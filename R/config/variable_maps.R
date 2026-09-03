@@ -15,9 +15,6 @@
 #   extra_combined_cols         -- columns that count toward anti_tob_expo
 #                                  ONLY, not toward anti_cig_expo/anti_slt_expo
 #                                  (Sri Lanka's bidi HWL item -- see note below)
-#   quit_attempt_invalid_codes  -- D01/D09 codes treated as invalid/missing
-#                                  (Pakistan's codebook uses 7 AND 9; the
-#                                  other three surveys use 9 only)
 #   smoker_flag / smokeless_flag -- current-use classification rule:
 #       simple_cols: columns OR'd via `%in% c(1, 2)`
 #       item_cols:   columns OR'd via `. > 0 & . < 888` (probe items used by
@@ -56,7 +53,6 @@ variable_maps <- list(
     hwl_slt_cols     = "G202a",
     extra_combined_cols = character(0),
 
-    quit_attempt_invalid_codes = list(D01 = c(7, 9), D09 = c(7, 9)),
 
     smoker_flag    = list(simple_cols = "B01", item_cols = character(0)),
     smokeless_flag = list(simple_cols = "C01", item_cols = character(0)),
@@ -82,8 +78,6 @@ variable_maps <- list(
     hwl_slt_cols     = "G02A",
     extra_combined_cols = character(0),
 
-    quit_attempt_invalid_codes = list(D01 = 9, D09 = 9),
-
     smoker_flag = list(
       simple_cols = c("B01", "B03"),
       item_cols   = c("B06A","B06B","B06C","B06E","B06F","B06G",
@@ -102,7 +96,7 @@ variable_maps <- list(
 
     cluster_col = "gatscluster", strata_col = "GATSSTRATA", weight_col = "gatsweight",
 
-    outcome_cols = c("D01", "D09")
+    outcome_cols = c("D01", "D09", "D08", "D16")
   ),
 
   bangladesh = list(
@@ -115,8 +109,6 @@ variable_maps <- list(
     hwl_smoke_cols   = "G02",
     hwl_slt_cols     = "G02A",
     extra_combined_cols = character(0),
-
-    quit_attempt_invalid_codes = list(D01 = 9, D09 = 9),
 
     smoker_flag = list(
       simple_cols = c("B01", "B03"),
@@ -136,7 +128,7 @@ variable_maps <- list(
 
     cluster_col = "gatscluster", strata_col = "gatsstrata", weight_col = "gatsweight",
 
-    outcome_cols = c("D01", "D09")
+    outcome_cols = c("D01", "D09", "D08", "D16")
   ),
 
   sri_lanka = list(
@@ -152,8 +144,6 @@ variable_maps <- list(
     # folded into the cigarette-specific exposure measure in the original
     # analysis -- preserved via extra_combined_cols rather than hwl_smoke_cols.
     extra_combined_cols = "G202B",
-
-    quit_attempt_invalid_codes = list(D01 = 9, D09 = 9),
 
     smoker_flag = list(
       simple_cols = c("B01", "B03"),
@@ -171,7 +161,7 @@ variable_maps <- list(
 
     cluster_col = "gatscluster", strata_col = "gatsstrata", weight_col = "gatsweight",
 
-    outcome_cols = c("D01", "D09")
+    outcome_cols = c("D01", "D09", "D08", "D16")
   )
 )
 
