@@ -1,0 +1,3076 @@
+---
+title: "GATS SEAR Region Analysis"
+output: html_document
+date: "2025-08-06"
+---
+
+Data Cleaning:
+
+Step 1: Installing & Loading packages:
+
+```{r}
+library(tidyverse)
+library(survey)
+library(srvyr)
+library(janitor)
+library(broom)
+library(broom.helpers)
+library(modelsummary)
+library(gt)
+library(glue)
+library(forcats)
+library(labelled)
+
+```
+
+Step 2: Importing Data
+
+Setting directory:
+
+```{r}
+setwd('/Users/amnarauf/Library/CloudStorage/Box-Box/RAship DGIHI/Analysis/Data')
+```
+
+```{r}
+GATS_PK_raw <- read_csv( "~/Library/CloudStorage/Box-Box/RAship DGIHI/Analysis/Data/PAKISTAN_2014.csv")
+
+GATS_IND_raw <- read_csv("~/Library/CloudStorage/Box-Box/RAship DGIHI/Analysis/Data/INDIA_2016.csv")
+
+GATS_BA_raw <- read_csv("~/Library/CloudStorage/Box-Box/RAship DGIHI/Analysis/Data/Bangla_GATS_2017_Public_use_06Spe2018.csv")
+
+GATS_SL_raw <- read_csv("~/Library/CloudStorage/Box-Box/RAship DGIHI/Analysis/Data/LKA_GATS_2020_Public_Use.csv")
+```
+
+```{r}
+# ---- Settings ----------------------------------------------------------------
+options(survey.lonely.psu = "adjust")
+```
+
+PAKISTAN
+
+```{r}
+# ---- Variable Mapping --------------------------------------------------------
+pk_media_smoke_cols <- c("G201a1","G201b1","G201c1","G201d1","G201e1")
+pk_media_slt_cols   <- c("G201a2","G201b2","G201c2","G201d2","G201e2")
+pk_hwl_smoke_col    <- "G202"
+pk_hwl_slt_col      <- "G202a"
+```
+
+```{r}
+# ---- Filter to Analysis Sample -----------------------------------------------
+data_clean <- GATS_PK_raw %>%
+  filter(
+    !is.na(D01) | !is.na(D09) | !is.na(D08) | !is.na(D16),   # quit attempt OR intention
+    !if_all(any_of(c(pk_media_smoke_cols, pk_hwl_smoke_col,
+                     pk_media_slt_cols, pk_hwl_slt_col)), is.na)
+  )
+nrow(data_clean)
+```
+
+
+```{r}
+# ---- Quit Attempts -----------------------------------------------------------
+data_clean <- data_clean %>%
+  mutate(
+    quit_smoking = case_when(
+      D01 == 1 ~ 1,
+      D01 == 2 ~ 0,
+      D01 %in% c(7, 9) | is.na(D01) ~ NA_real_
+    ),
+    quit_smokeless = case_when(
+      D09 == 1 ~ 1,
+      D09 == 2 ~ 0,
+      D09 %in% c(7, 9) | is.na(D09) ~ NA_real_
+    )
+  )
+```
+
+```{r}
+# ---- Quit Intentions ---------------------------------------------------------
+data_clean <- data_clean %>%
+  mutate(
+    quit_smoking_intent = case_when(
+      D08 %in% c(1, 2) ~ 1,
+      D08 %in% c(3, 4) ~ 0,
+      D08 %in% c(7, 9) | is.na(D08) ~ NA_real_
+    ),
+    quit_slt_intent = case_when(
+      D16 %in% c(1, 2) ~ 1,
+      D16 %in% c(3, 4) ~ 0,
+      D16 %in% c(7, 9) | is.na(D16) ~ NA_real_
+    )
+  )
+```
+
+
+```{r}
+# ---- Tobacco User Type -------------------------------------------------------
+# Current use only, per standard GATS definitions (B01, C01).
+# Waterpipe excluded: the Pakistan WP module (WP1, WP2) captures PAST use only
+# and is administered to ever-smokers, so current waterpipe use is not identifiable.
+data_clean <- data_clean %>%
+  mutate(
+    smoker    = if_else(B01 %in% c(1, 2), 1, 0, missing = 0),
+    smokeless = if_else(C01 %in% c(1, 2), 1, 0, missing = 0),
+
+    user_type = case_when(
+      smoker == 1 & smokeless == 1 ~ "Dual: Smoker + Smokeless",
+      smoker == 1                  ~ "Smoker only",
+      smokeless == 1               ~ "Smokeless only",
+      TRUE                         ~ NA_character_
+    ),
+
+    user3 = case_when(
+      user_type == "Smoker only"               ~ "Smoker",
+      user_type == "Smokeless only"            ~ "Smokeless",
+      user_type == "Dual: Smoker + Smokeless"  ~ "Dual"
+    ),
+    dual_use = if_else(user_type == "Dual: Smoker + Smokeless", 1L, 0L)
+  )
+
+# User type distribution
+data_clean %>%
+  count(user_type, name = "n", sort = TRUE) %>%
+  mutate(pct = round(100 * n / sum(n), 2))
+
+# Sanity check: should return 0 — everyone in data_clean answered D01 or D09,
+# so everyone must be a current smoker or current SLT user
+sum(is.na(data_clean$user_type))
+```
+
+
+
+```{r}
+# ---- Demographics ------------------------------------------------------------
+data_clean <- data_clean %>%
+  mutate(
+    age_group = case_when(
+      age >= 15 & age <= 24 ~ "15-24",
+      age >= 25 & age <= 44 ~ "25-44",
+      age >= 45 & age <= 64 ~ "45-64",
+      age >= 65 ~ "65+",
+            TRUE ~ NA_character_
+    )
+    %>% factor(levels = c("15-24","25-44","45-64","65+")),
+    
+    gender = case_when(
+      A01 == 1 ~ "Male",
+      A01 == 2 ~ "Female"
+    ),
+    
+  education = case_when(
+      A04 == 1               ~ "No Education",
+      A04 %in% c(2, 3, 4)    ~ "Primary or Less",
+      A04 %in% c(5, 6, 7, 8) ~ "Secondary or above",
+      TRUE                   ~ NA_character_          # includes 77, 99 (don't know/refused)
+    ),
+
+    # Collapsed employment (2 categories: self-employed merged into employed)
+    employment = case_when(
+      A05 %in% c(1, 2, 3)    ~ "Employed",         # Govt/Non-govt/Daily wage/Self-employed
+      A05 %in% c(4, 5, 6, 7, 8, 9) ~ "Not Working",      # Student/Homemaker/Retired/Unemployed
+      A05 %in% c(77, 99)        ~ NA_character_        # Unknown → missing
+    ),
+    
+  residence_label = case_when(
+      residence == 1 ~ "Urban",
+      residence == 2 ~ "Rural"
+    ),
+  )
+
+# Check demographic variables
+data_clean %>%
+  summarise(
+    n = n(),
+    n_gender = n_distinct(gender, na.rm = TRUE),
+    n_education = n_distinct(education, na.rm = TRUE),
+    n_residence = n_distinct(residence, na.rm = TRUE),
+    n_employment = n_distinct(employment, na.rm = TRUE)
+  )
+```
+
+```{r}
+# ---- Survey Design -----------------------------------------------------------
+pk_design <- svydesign(
+  id = ~gatscluster,
+  strata = ~gatsstrata,
+  weights = ~gatsweight,
+  data = data_clean,
+  nest = TRUE
+)
+```
+
+```{r}
+data_clean %>% count(user3)
+```
+
+
+```{r}
+# ==============================================================================
+# TABLE 1: DEMOGRAPHIC CHARACTERISTICS BY TOBACCO USER TYPE
+# ==============================================================================
+
+cats <- c("Smoker","Smokeless","Dual")
+demo_vars <- c("gender","age_group","education","employment","residence_label")
+
+var_labels <- c(
+  gender      = "Gender",
+  age_group   = "Age group",
+  education   = "Education",
+  employment  = "Employment",
+ residence_label   = "Residence"
+)
+
+# Helper function
+as_char_with_missing <- function(x) as.character(x)
+
+# Guard: every user3 value must be a declared level, or the factor() call
+# below will silently convert it to NA and drop those rows from Table 1
+stopifnot(all(na.omit(unique(as.character(data_clean$user3))) %in% cats))
+
+# Ensure user3 levels
+tbl1_data <- data_clean %>%
+  mutate(user3 = factor(user3, levels = cats))
+
+# Unweighted counts
+get_demo_counts_user3 <- function(df, var){
+  stopifnot(var %in% names(df))
+  df %>%
+    filter(!is.na(user3)) %>%
+    mutate(`__cat__` = as_char_with_missing(.data[[var]])) %>%   # .data, not df
+    filter(!is.na(`__cat__`)) %>%
+    count(`__cat__`, user3, name = "n") %>%
+    complete(`__cat__`, user3 = factor(cats, levels = cats), fill = list(n = 0)) %>%
+    pivot_wider(names_from = user3, values_from = n) %>%
+    mutate(
+      Category_Total = rowSums(across(all_of(cats)), na.rm = TRUE),
+      Variable = var
+    ) %>%
+    rename(Category = `__cat__`) %>%
+    select(Variable, Category, Category_Total, all_of(cats))
+}
+
+table1_counts <- bind_rows(lapply(demo_vars, function(v) get_demo_counts_user3(tbl1_data, v)))
+
+# Weighted column percentages
+get_weighted_colpct_user3 <- function(pk_design, var){
+  x <- pk_design$variables[[var]]
+  x_fac <- factor(as_char_with_missing(x))
+  pk_v <- do.call(update, c(list(pk_design), setNames(list(x_fac), var)))
+  levs <- levels(x_fac)
+  
+  out <- data.frame(Category = levs, stringsAsFactors = FALSE)
+  
+  for (cat in cats) {
+    d_cat <- subset(pk_v, user3 == cat)
+    if (length(weights(d_cat)) == 0) {
+      est_vec <- rep(NA_real_, length(levs))
+      se_vec  <- rep(NA_real_, length(levs))
+    } else {
+      est <- svymean(as.formula(paste0("~", var)), d_cat, na.rm = TRUE)
+      se  <- SE(est)
+      est_vec <- as.numeric(est) * 100
+      se_vec  <- as.numeric(se) * 100
+      
+      if (length(est_vec) != length(levs)) {
+        nm <- names(est)
+        lvl_from_names <- substring(nm, nchar(var) + 1)
+        aligned <- rep(NA_real_, length(levs))
+        aligned_se <- rep(NA_real_, length(levs))
+        for (i in seq_along(lvl_from_names)) {
+          j <- match(lvl_from_names[i], levs)
+          if (!is.na(j)) {
+            aligned[j] <- est_vec[i]
+            aligned_se[j] <- se_vec[i]
+          }
+        }
+        est_vec <- aligned
+        se_vec <- aligned_se
+      }
+    }
+    out[[paste0(cat, "_pct")]] <- est_vec
+    out[[paste0(cat, "_se")]] <- se_vec
+  }
+  
+  out$Variable <- var
+  tibble::as_tibble(out)
+}
+
+table1_weighted <- bind_rows(lapply(demo_vars, function(v) get_weighted_colpct_user3(pk_design, v)))
+```
+
+
+```{r}
+# ---- Design-adjusted (Rao-Scott) chi-square: smokers vs SLT users -----------
+# Dual users excluded (sparse cells); one p-value per variable.
+get_table1_pval <- function(design, var){
+  d <- subset(design, user3 %in% c("Smoker","Smokeless") &
+                      !is.na(design$variables[[var]]))
+  t <- svychisq(as.formula(paste0("~", var, " + user3")), d, statistic = "F")
+  tibble::tibble(Variable = var,
+                 p = ifelse(t$p.value < 0.001, "<0.001", sprintf("%.3f", t$p.value)))
+}
+
+table1_pvals <- bind_rows(lapply(demo_vars, function(v) get_table1_pval(pk_design, v))) %>%
+  mutate(Variable = dplyr::recode(Variable, !!!var_labels))
+
+# Join and format
+table1_joined <- table1_counts %>%
+  left_join(table1_weighted, by = c("Variable","Category")) %>%
+  mutate(
+    across(ends_with("_pct"), ~replace_na(., 0)),
+    across(ends_with("_se"), ~replace_na(., 0)),
+    Variable = dplyr::recode(Variable, !!!var_labels)
+  ) %>%
+  arrange(factor(Variable, levels = unname(var_labels)), Category) %>%
+  left_join(table1_pvals, by = "Variable") %>%          # <- p-value joined here
+  group_by(Variable) %>%
+  mutate(
+    p        = if_else(row_number() == 1, p, ""),        # show only on first row of block
+    Variable = if_else(row_number() == 1, Variable, "")
+  ) %>%
+  ungroup()
+n_user3 <- data_clean %>% filter(!is.na(user3)) %>% nrow()
+
+# Format for display
+fmt_pct_se <- function(p, s){
+  ifelse(is.na(p), "", sprintf("%.1f (%.1f)", p, s))
+}
+
+table1_disp <- table1_joined %>%
+  mutate(
+    Smoker_pctSE    = fmt_pct_se(Smoker_pct, Smoker_se),
+    Smokeless_pctSE = fmt_pct_se(Smokeless_pct, Smokeless_se),
+    Dual_pctSE      = fmt_pct_se(Dual_pct, Dual_se)
+  ) %>%
+  select(
+    Variable, Category, Category_Total,
+    Smoker, Smoker_pctSE,
+    Smokeless, Smokeless_pctSE,
+    Dual, Dual_pctSE,
+    p  
+  )
+table1_disp %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1. Demographic characteristics by tobacco user type for Pakistan",
+    subtitle = paste0(
+      "Unweighted counts and survey-weighted column percentages (SE). ",
+      "Analysis limited to non-missing user type (N = ", format(n_user3, big.mark=","), ")."
+    )
+  ) %>%
+  cols_label(
+    Variable = "Variable",
+    Category = "Category",
+    Category_Total = "Row Total",
+    Smoker = "n",
+    Smoker_pctSE = "% (SE)",
+    Smokeless = "n",
+    Smokeless_pctSE = "% (SE)",
+    Dual = "n",
+    Dual_pctSE = "% (SE)",
+    p = "p-value"
+  ) %>%
+  tab_spanner(label = "Smoker", id = "sp_Smoker", columns = c(Smoker, Smoker_pctSE)) %>%
+  tab_spanner(label = "Smokeless", id = "sp_Smokeless", columns = c(Smokeless, Smokeless_pctSE)) %>%
+ tab_spanner(label = "Dual", id = "sp_Dual", columns = c(Dual, Dual_pctSE)) %>%
+  fmt_number(columns = c(Category_Total, Smoker, Smokeless, Dual), decimals = 0) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  ) %>%
+  tab_source_note("Note: Percentages are survey-weighted column percentages within each user type. 'Dual' refers to respondents who currently use both smoked and smokeless tobacco.p-values from design-adjusted (Rao-Scott) chi-square tests comparing smokers with smokeless tobacco users; dual users excluded owing to small cell sizes.")
+
+```
+
+
+
+```{r}
+make_expo <- function(df, items){
+  any_yes   <- rowSums(across(all_of(items), ~ . == 1), na.rm = TRUE) > 0
+  any_valid <- rowSums(across(all_of(items), ~ . %in% c(1,2)), na.rm = TRUE) > 0
+  dplyr::case_when(
+    any_yes              ~ 1,
+    any_valid & !any_yes ~ 0,
+    TRUE                 ~ NA_real_
+  )
+}
+
+data_clean <- data_clean %>%
+  mutate(
+    anti_cig_expo = make_expo(., c("G201a1","G201b1","G201c1","G201d1","G201e1","G202")),
+    anti_slt_expo = make_expo(., c("G201a2","G201b2","G201c2","G201d2","G201e2","G202a")),
+    anti_tob_expo = make_expo(., c("G201a1","G201b1","G201c1","G201d1","G201e1","G202",
+                                   "G201a2","G201b2","G201c2","G201d2","G201e2","G202a"))
+  )
+```
+
+```{r}
+exposure_vars <- c("anti_tob_expo", "anti_cig_expo", "anti_slt_expo")
+
+outcome_demo_vars <- c("quit_smoking", "quit_smokeless",
+                       "quit_smoking_intent", "quit_slt_intent",
+                       "gender", "age_group", "education",
+                       "employment", "residence")
+
+data_clean %>%
+  summarise(across(
+    all_of(c(outcome_demo_vars, exposure_vars)),
+    ~ sum(is.na(.))
+  )) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>%
+  mutate(pct_missing = round(100 * n_missing / nrow(data_clean), 1)) %>%
+  arrange(desc(n_missing))
+```
+
+
+```{r}
+# Smoking quit items among smokers only
+data_clean %>%
+  filter(user_type %in% c("Smoker only", "Dual: Smoker + Smokeless")) %>%
+  summarise(
+    n_smokers          = n(),
+    miss_quit_smoking  = sum(is.na(quit_smoking)),
+    pct_quit_smoking   = round(100*mean(is.na(quit_smoking)),1),
+    miss_intent        = sum(is.na(quit_smoking_intent)),
+    pct_intent         = round(100*mean(is.na(quit_smoking_intent)),1)
+  )
+
+# Smokeless quit items among SLT users only
+data_clean %>%
+  filter(user_type %in% c("Smokeless only", "Dual: Smoker + Smokeless")) %>%
+  summarise(
+    n_slt              = n(),
+    miss_quit_slt      = sum(is.na(quit_smokeless)),
+    pct_quit_slt       = round(100*mean(is.na(quit_smokeless)),1),
+    miss_intent_slt    = sum(is.na(quit_slt_intent)),
+    pct_intent_slt     = round(100*mean(is.na(quit_slt_intent)),1)
+  )
+```
+
+
+```{r}
+data_clean %>%
+  filter(user_type %in% c("Smokeless only", "Dual: Smoker + Smokeless")) %>%
+  count(quit_smoking, intent_missing = is.na(quit_smoking_intent))
+```
+
+```{r}
+# ==============================================================================
+# REFRESH SURVEY DESIGN (data_clean has been updated since pk_design was built)
+# ==============================================================================
+
+library(knitr)
+library(kableExtra)
+
+pk_design <- svydesign(
+  id      = ~gatscluster,
+  strata  = ~gatsstrata,
+  weights = ~gatsweight,
+  data    = data_clean,
+  nest    = TRUE
+)
+
+options(survey.lonely.psu = "adjust")
+```
+
+```{r}
+# ==============================================================================
+# SET REFERENCE LEVELS + SUBSET TO CURRENT USERS
+# ==============================================================================
+
+ensure_levels_pk <- function(des) {
+  update(
+    des,
+    age_group  = factor(age_group, levels = c("15-24","25-44","45-64","65+")),
+    gender     = factor(gender, levels = c("Female","Male")),
+    education  = factor(education, levels = c("No Education","Primary or Less","Secondary or above")),
+   residence_label = factor(residence_label, levels = c("Rural","Urban")),
+    employment = factor(employment, levels = c("Not Working","Employed"))
+  )
+}
+
+# Same user_type groupings used in your quit-items missingness check
+smoker_types_pk <- c("Smoker only", "Dual: Smoker + Smokeless")
+slt_types_pk    <- c("Smokeless only", "Dual: Smoker + Smokeless")
+
+smokers_pk <- subset(pk_design, user_type %in% smoker_types_pk) %>% ensure_levels_pk()
+slt_pk     <- subset(pk_design, user_type %in% slt_types_pk)    %>% ensure_levels_pk()
+
+cat("Smokers (Pakistan):", nrow(smokers_pk$variables), "\n")
+cat("SLT users (Pakistan):", nrow(slt_pk$variables), "\n")
+```
+
+
+```{r}
+smokers_pk$variables %>% count(dual_use, quit_smoking)
+smokers_pk$variables %>% count(dual_use, quit_smoking_intent)
+slt_pk$variables     %>% count(dual_use, quit_smokeless)
+slt_pk$variables     %>% count(dual_use, quit_slt_intent)
+```
+
+```{r}
+# ==============================================================================
+# FIT MODELS — SMOKING (Table 4)
+# ==============================================================================
+
+model_smk_attempt_pk <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment ,
+  design = smokers_pk,
+  family = binomial(link = "logit")
+)
+summary(model_smk_attempt_pk)
+
+model_smk_intent_pk <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_pk,
+  family = binomial(link = "logit")
+)
+summary(model_smk_intent_pk)
+```
+```{r}
+# ==============================================================================
+# FIT MODELS — SMOKELESS (Table 5)
+# ==============================================================================
+
+model_slt_attempt_pk <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_pk,
+  family = binomial(link = "logit")
+)
+summary(model_slt_attempt_pk)
+
+model_slt_intent_pk <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_pk,
+  family = binomial(link = "logit")
+)
+summary(model_slt_intent_pk)
+```
+```{r}
+# ==============================================================================
+# HELPER FUNCTIONS TO BUILD FORMATTED TABLES
+# ==============================================================================
+
+tidy_or_stars <- function(model) {
+  broom::tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(
+      stars = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01  ~ "**",
+        p.value < 0.05  ~ "*",
+        TRUE            ~ ""
+      ),
+      `aOR (95% CI)` = ifelse(
+        term == "(Intercept)", "",
+        paste0(round(estimate, 2),
+               " (", round(conf.low, 2), "\u2013", round(conf.high, 2), ")",
+               stars)
+      ),
+      p = ifelse(
+        term == "(Intercept)", "",
+        ifelse(p.value < 0.001, "<0.001", sprintf("%.3f", p.value))
+      )
+    ) %>%
+    select(term, `aOR (95% CI)`, p)
+}
+
+recode_terms_pk <- function(df, exposure_term, exposure_label) {
+  df %>%
+    mutate(
+      Level = dplyr::recode(term,
+        "(Intercept)"                       = "Intercept",
+        !!exposure_term                     := exposure_label,
+        "age_group25-44"                    = "25\u201344",
+        "age_group45-64"                    = "45\u201364",
+        "age_group65+"                      = "65+",
+        "genderMale"                        = "Male",
+      "educationPrimary or Less"    = "Primary or Less",
+        "educationSecondary or above" = "Secondary or above",
+        "residence_labelUrban" = "Urban",
+        "employmentEmployed"          = "Employed",
+       "dual_use"                          = "Dual use",
+        .default = term
+      ),
+      Predictor = case_when(
+        Level == exposure_label                                    ~ "Anti-Tobacco Exposure",
+        Level %in% c("25\u201344", "45\u201364", "65+")            ~ "Age Group",
+        Level == "Male"                                             ~ "Sex",
+        Level %in% c("Primary or Less", "Secondary or above")     ~ "Education",
+        Level == "Urban"                                            ~ "Residence",
+        Level == "Employed"                                        ~ "Employment",
+      Level == "Dual use"                                        ~ "Dual Use",
+        TRUE ~ NA_character_
+      )
+    )
+}
+
+build_pk_or_table <- function(model_attempt, model_intent,
+                               exposure_term, exposure_label,
+                               table_num, table_title, footnote_text) {
+
+  attempt_or <- tidy_or_stars(model_attempt) %>%
+    rename(`Quit Attempt aOR (95% CI)` = `aOR (95% CI)`,
+           `Quit Attempt p` = p)
+
+  intent_or <- tidy_or_stars(model_intent) %>%
+    rename(`Quit Intention aOR (95% CI)` = `aOR (95% CI)`,
+           `Quit Intention p` = p)
+
+  combined <- attempt_or %>%
+    full_join(intent_or, by = "term") %>%
+    recode_terms_pk(exposure_term = exposure_term, exposure_label = exposure_label)
+
+  ref_rows <- tibble::tribble(
+    ~Predictor,   ~Level,                     ~`Quit Attempt aOR (95% CI)`, ~`Quit Attempt p`, ~`Quit Intention aOR (95% CI)`, ~`Quit Intention p`,
+    "Age Group",  "15\u201324 (Reference)",   "\u2014", "", "\u2014", "",
+    "Sex",        "Female (Reference)",       "\u2014", "", "\u2014", "",
+    "Education",  "No Education (Reference)", "\u2014", "", "\u2014", "",
+    "Residence",  "Rural (Reference)",        "\u2014", "", "\u2014", "",
+    "Employment", "Not Working (Reference)",  "\u2014", "", "\u2014", ""
+  )
+
+  final_tab <- bind_rows(
+    ref_rows,
+    combined %>%
+      filter(term != "(Intercept)") %>%
+      select(Predictor, Level,
+             `Quit Attempt aOR (95% CI)`, `Quit Attempt p`,
+             `Quit Intention aOR (95% CI)`, `Quit Intention p`)
+  ) %>%
+    mutate(Predictor = factor(Predictor,
+      levels = c("Anti-Tobacco Exposure", "Age Group", "Sex",
+                 "Education", "Residence", "Employment", "Dual Use")   # <- added "Dual Use"
+    )) %>%
+    arrange(Predictor) %>%
+    mutate(
+      Level = if_else(is.na(Level), "", Level),
+      across(c(`Quit Attempt aOR (95% CI)`, `Quit Attempt p`,
+               `Quit Intention aOR (95% CI)`, `Quit Intention p`),
+             ~ if_else(is.na(.), "", .))
+    ) %>%
+    group_by(Predictor) %>%
+    mutate(Predictor_display = if_else(row_number() == 1, as.character(Predictor), "")) %>%
+    ungroup() %>%
+    select(Predictor = Predictor_display, Level,
+           `Quit Attempt aOR (95% CI)`, `Quit Attempt p`,
+           `Quit Intention aOR (95% CI)`, `Quit Intention p`)
+
+  knitr::kable(
+    final_tab,
+    align   = "llcccc",
+    caption = paste0("Table ", table_num, ". ", table_title)
+  ) %>%
+    kableExtra::kable_styling(
+      full_width        = FALSE,
+      position          = "left",
+      bootstrap_options = c("condensed"),
+      font_size         = 11
+    ) %>%
+    kableExtra::column_spec(1, bold = TRUE, width = "3cm") %>%
+    kableExtra::column_spec(2, width = "4cm") %>%
+    kableExtra::column_spec(3, width = "3.5cm") %>%
+    kableExtra::column_spec(4, width = "1.8cm") %>%
+    kableExtra::column_spec(5, width = "3.5cm") %>%
+    kableExtra::column_spec(6, width = "1.8cm") %>%
+    kableExtra::footnote(general = footnote_text, footnote_as_chunk = TRUE)
+}
+```
+
+```{r}
+# ==============================================================================
+# TABLE 4: SMOKERS — PAKISTAN
+# ==============================================================================
+
+build_pk_or_table(
+  model_attempt  = model_smk_attempt_pk,
+  model_intent   = model_smk_intent_pk,
+  exposure_term  = "anti_cig_expo",
+  exposure_label = "Exposed to Anti-Cigarette Media/HWL",
+  table_num      = 4,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among smokers, Pakistan GATS 2014",
+footnote_text  = "* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = 949; quit intention model N = 780. Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+```
+
+```{r}
+# ==============================================================================
+# TABLE 5: SLT USERS — PAKISTAN
+# ==============================================================================
+
+build_pk_or_table(
+  model_attempt  = model_slt_attempt_pk,
+  model_intent   = model_slt_intent_pk,
+  exposure_term  = "anti_slt_expo",
+  exposure_label = "Exposed to Anti-SLT Media/HWL",
+  table_num      = 5,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among SLT users, Pakistan GATS 2014",
+footnote_text  = "* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = 661; quit intention model N = 519. Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+```
+
+```{r}
+c(length(model_slt_attempt_pk$y),
+  nrow(model_slt_attempt_pk$model))
+```
+
+
+```{r}
+# ==============================================================================
+# FLOW DIAGRAM NUMBERS: Total interviewed -> Any tobacco user -> Analytic sample
+# ==============================================================================
+
+# ---- Total interviewed ----
+n_total <- nrow(GATS_PK_raw)
+cat("Total interviewed:", n_total, "\n")
+
+# ---- Any tobacco user (smoker, smokeless, or waterpipe) on RAW data ----
+tobacco_user_flow <- GATS_PK_raw %>%
+  mutate(
+    smoker    = if_else(B01 %in% c(1, 2), 1, 0, missing = 0),
+    smokeless = if_else(C01 %in% c(1, 2), 1, 0, missing = 0),
+    any_tobacco_user = if_else(smoker == 1 | smokeless == 1, 1, 0)
+  )
+
+n_any_user <- sum(tobacco_user_flow$any_tobacco_user)
+cat("Current tobacco user (smoked and/or smokeless):", n_any_user,
+    sprintf("(%.1f%% of total)", 100 * n_any_user / n_total), "\n")
+
+# ---- Of tobacco users, how many meet the inclusion criteria you already use? ----
+pk_media_smoke_cols <- c("G201a1","G201b1","G201c1","G201d1","G201e1")
+pk_media_slt_cols   <- c("G201a2","G201b2","G201c2","G201d2","G201e2")
+pk_hwl_smoke_col    <- "G202"
+pk_hwl_slt_col      <- "G202a"
+
+n_analytic <- tobacco_user_flow %>%
+  filter(any_tobacco_user == 1) %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(pk_media_smoke_cols, pk_hwl_smoke_col,
+                     pk_media_slt_cols, pk_hwl_slt_col)), is.na)
+  ) %>%
+  nrow()
+
+cat("Analytic sample (tobacco users with non-missing quit/exposure data):", n_analytic,
+    sprintf("(%.1f%% of tobacco users)", 100 * n_analytic / n_any_user), "\n")
+
+cat("\nExcluded tobacco users:", n_any_user - n_analytic, "\n")
+```
+
+```{r}
+# ==============================================================================
+# EXACT ANALYTIC N FOR EACH REGRESSION MODEL
+# ==============================================================================
+
+cat("Model N (smoking quit attempt):   ", length(model_smk_attempt_pk$y), "\n")
+cat("Model N (smoking quit intention): ", length(model_smk_intent_pk$y), "\n")
+cat("Model N (SLT quit attempt):       ", length(model_slt_attempt_pk$y), "\n")
+cat("Model N (SLT quit intention):     ", length(model_slt_intent_pk$y), "\n")
+```
+```{r}
+# ==============================================================================
+# TABLES 2 & 3: WEIGHTED EXPOSURE PREVALENCE BY SOCIODEMOGRAPHIC GROUP
+# ==============================================================================
+exposure_by_demo <- function(design, exposure_var, demo_vars, var_labels, min_n = 10) {
+
+  # design-adjusted (Rao-Scott) chi-square: exposure across each variable's categories
+  # self-employed excluded from the employment test (sparse cells)
+  get_p <- function(v) {
+    d <- subset(design, !is.na(design$variables[[v]]) &
+                        !is.na(design$variables[[exposure_var]]))
+    if (v == "employment") d <- subset(d, employment != "Self-Employed")
+    t <- svychisq(as.formula(paste0("~", v, " + ", exposure_var)), d, statistic = "F")
+    ifelse(t$p.value < 0.001, "<0.001", sprintf("%.3f", t$p.value))
+  }
+
+  purrr::map_dfr(demo_vars, function(v) {
+    f_out <- as.formula(paste0("~", exposure_var))
+    f_by  <- as.formula(paste0("~", v))
+    des_v <- subset(design, !is.na(design$variables[[v]]) &
+                            !is.na(design$variables[[exposure_var]]))
+    est <- svyby(f_out, f_by, des_v, svyciprop,
+                 vartype = "ci", method = "logit", na.rm = TRUE)
+    ns <- des_v$variables %>%
+      count(.data[[v]], name = "n_unwt") %>%
+      rename(Category = 1)
+
+    p_val <- get_p(v)
+
+    tibble::tibble(
+      Variable = unname(var_labels[v]),
+      Category = as.character(est[[1]]),
+      pct      = as.numeric(est[[2]]) * 100,
+      lo       = est$ci_l * 100,
+      hi       = est$ci_u * 100
+    ) %>%
+      left_join(ns, by = "Category") %>%
+      mutate(
+        Estimate = if_else(
+          n_unwt < min_n,
+          "\u2014",
+          sprintf("%.1f%% (%.1f\u2013%.1f)", pct, lo, hi)
+        ),
+        p = if_else(row_number() == 1, p_val, "")   # p on first row of each variable block
+      ) %>%
+      select(Variable, Category, Estimate, n_unwt, p)
+  })
+}
+
+# Table 2 — anti-cigarette exposure among current smokers
+table2 <- exposure_by_demo(smokers_pk, "anti_cig_expo", demo_vars, var_labels)
+
+# Table 3 — anti-SLT exposure among current SLT users
+table3 <- exposure_by_demo(slt_pk, "anti_slt_expo", demo_vars, var_labels)
+
+table2
+table3
+```
+
+```{r}
+# Denominators for Table 2 and Table 3 footnotes
+cat("Table 2 (anti-cigarette among smokers) N =",
+    sum(!is.na(smokers_pk$variables$anti_cig_expo)), "\n")
+cat("Table 3 (anti-SLT among SLT users) N =",
+    sum(!is.na(slt_pk$variables$anti_slt_expo)), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# VERIFY MODEL N DROPS — SCOPED TO SMOKER AND SLT SUBSETS
+# ==============================================================================
+
+# ---- Smokers subset (N should be 961) ----
+smokers_pk$variables %>%
+  summarise(
+    n_total          = n(),
+    miss_quit_smoking       = sum(is.na(quit_smoking)),
+    miss_quit_smoking_intent = sum(is.na(quit_smoking_intent)),
+    miss_anti_cig_expo      = sum(is.na(anti_cig_expo)),
+    miss_age_group           = sum(is.na(age_group)),
+    miss_gender               = sum(is.na(gender)),
+    miss_education             = sum(is.na(education)),
+    miss_residence               = sum(is.na(residence)),
+    miss_employment                = sum(is.na(employment))
+  )
+
+# ---- Quit ATTEMPT model: how many rows have ALL required variables present? ----
+smokers_pk$variables %>%
+  filter(
+    !is.na(quit_smoking), !is.na(anti_cig_expo), !is.na(age_group),
+    !is.na(gender), !is.na(education), !is.na(residence), !is.na(employment)
+  ) %>%
+  nrow()
+# Should equal 950
+
+# ---- Quit INTENTION model: how many rows have ALL required variables present? ----
+smokers_pk$variables %>%
+  filter(
+    !is.na(quit_smoking_intent), !is.na(anti_cig_expo), !is.na(age_group),
+    !is.na(gender), !is.na(education), !is.na(residence), !is.na(employment)
+  ) %>%
+  nrow()
+# Should equal 778
+
+# ---- SLT subset (N should be 680) ----
+slt_pk$variables %>%
+  summarise(
+    n_total           = n(),
+    miss_quit_smokeless      = sum(is.na(quit_smokeless)),
+    miss_quit_slt_intent      = sum(is.na(quit_slt_intent)),
+    miss_anti_slt_expo       = sum(is.na(anti_slt_expo)),
+    miss_age_group             = sum(is.na(age_group)),
+    miss_gender                 = sum(is.na(gender)),
+    miss_education                = sum(is.na(education)),
+    miss_residence                  = sum(is.na(residence)),
+    miss_employment                   = sum(is.na(employment))
+  )
+
+slt_pk$variables %>%
+  filter(
+    !is.na(quit_smokeless), !is.na(anti_slt_expo), !is.na(age_group),
+    !is.na(gender), !is.na(education), !is.na(residence), !is.na(employment)
+  ) %>%
+  nrow()
+# Should equal 662
+
+slt_pk$variables %>%
+  filter(
+    !is.na(quit_slt_intent), !is.na(anti_slt_expo), !is.na(age_group),
+    !is.na(gender), !is.na(education), !is.na(residence), !is.na(employment)
+  ) %>%
+  nrow()
+# Should equal 520
+```
+
+```{r}
+ut <- svymean(~user3, subset(pk_design, !is.na(user3)), na.rm = TRUE)
+cbind(pct = round(coef(ut) * 100, 1), round(confint(ut) * 100, 1))
+```
+
+```{r}
+rates <- function(design, var) {
+  d <- subset(design, !is.na(design$variables[[var]]))
+  e <- svyciprop(as.formula(paste0("~", var)), d, method = "logit")
+  data.frame(variable = var, n = nrow(d$variables),
+             pct = round(as.numeric(e) * 100, 1),
+             lo  = round(confint(e)[1] * 100, 1),
+             hi  = round(confint(e)[2] * 100, 1))
+}
+
+bind_rows(
+  rates(smokers_pk, "quit_smoking"),
+  rates(smokers_pk, "quit_smoking_intent"),
+  rates(slt_pk,     "quit_smokeless"),
+  rates(slt_pk,     "quit_slt_intent")
+)
+```
+
+INDIA 
+
+```{r}
+dim(GATS_IND_raw) 
+```
+
+
+```{r}
+
+# ---- Variable Mapping --------------------------------------------------------
+in_media_smoke_cols <- c("G01A","G01B","G01C","G01D","G01E","G01F","G01G","G01H","G01I")
+in_media_slt_cols   <- c("G201A","G201B","G201C","G201D","G201E","G201F","G201G","G201H","G201I")
+in_hwl_smoke_col     <- "G02"
+in_hwl_slt_col       <- "G02A"
+
+# ---- Filter to Analysis Sample -----------------------------------------------
+in_clean <- GATS_IND_raw %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(in_media_smoke_cols, in_hwl_smoke_col,
+                     in_media_slt_cols,   in_hwl_slt_col)), is.na)
+  )
+dim(in_clean)
+```
+
+```{r}
+# ---- Quit Attempts ------------------------------------------------------------
+in_clean <- in_clean %>%
+  mutate(
+    quit_smoking = case_when(
+      D01 == 1 ~ 1,
+      D01 == 2 ~ 0,
+      D01 == 9 | is.na(D01) ~ NA_real_
+    ),
+    quit_smokeless = case_when(
+      D09 == 1 ~ 1,
+      D09 == 2 ~ 0,
+      D09 == 9 | is.na(D09) ~ NA_real_
+    )
+  )
+```
+
+```{r}
+# ---- Quit Intentions -----------------------------------------------------------
+in_clean <- in_clean %>%
+  mutate(
+    quit_smoking_intent = case_when(
+      D08 %in% c(1, 2) ~ 1,
+      D08 %in% c(3, 4) ~ 0,
+      D08 %in% c(7, 9) | is.na(D08) ~ NA_real_
+    ),
+    quit_slt_intent = case_when(
+      D16 %in% c(1, 2) ~ 1,
+      D16 %in% c(3, 4) ~ 0,
+      D16 %in% c(7, 9) | is.na(D16) ~ NA_real_
+    )
+  )
+```
+
+```{r}
+# ---- Tobacco User Type (RESTRICTED to Smoker / Smokeless / Dual, matching Pakistan) ----
+in_clean <- in_clean %>%
+  mutate(
+    smoker = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06B, B06C, B06E, B06F, B06G,
+                         B10A, B10B, B10C, B10E, B10F, B10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D, C06E, C06F, C06G,
+                         C10A, C10B, C10C, C10D, C10E, C10F, C10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+
+    # NOTE: waterpipe/e-cig kept only as diagnostic indicators — NOT used in user_type
+    waterpipe  = if_else(WP0 %in% c(1, 2), 1, 0, missing = 0),
+    ecigarette = if_else(EC2 %in% c(1, 2), 1, 0, missing = 0),
+
+    # Restricted 3-category classification — mirrors Pakistan exactly
+    user_type = case_when(
+      smoker == 1 & smokeless == 1 ~ "Dual: Smoker + Smokeless",
+      smoker == 1                  ~ "Smoker only",
+      smokeless == 1               ~ "Smokeless only",
+      TRUE                         ~ NA_character_   # waterpipe-only/e-cig-only/non-users excluded
+    ),
+
+    user3 = case_when(
+      user_type == "Smoker only"              ~ "Smoker",
+      user_type == "Smokeless only"           ~ "Smokeless",
+      user_type == "Dual: Smoker + Smokeless" ~ "Dual"
+    ),
+    dual_use = if_else(user_type == "Dual: Smoker + Smokeless", 1L, 0L)
+  )
+
+# User type distribution
+in_clean %>%
+  count(user_type, name = "n", sort = TRUE) %>%
+  mutate(pct = round(100 * n / sum(n), 2))
+
+# Diagnostic: how many respondents are waterpipe-only/e-cig-only and now excluded?
+in_clean %>%
+  filter(is.na(user_type)) %>%
+  summarise(n = n(), pct_of_sample = round(100 * n / nrow(in_clean), 2))
+
+```
+```{r}
+# ---- Anti-Tobacco Exposure (using make_expo — consistent with Pakistan) -------
+# NOTE: requires make_expo() defined earlier (Pakistan chunk)
+in_clean <- in_clean %>%
+  mutate(
+    anti_tob_expo = make_expo(., c("G01A","G01B","G01C","G01D","G01E","G01F","G01G","G01H","G01I","G02",
+                                   "G201A","G201B","G201C","G201D","G201E","G201F","G201G","G201H","G201I","G02A")),
+    anti_cig_expo = make_expo(., c("G01A","G01B","G01C","G01D","G01E","G01F","G01G","G01H","G01I","G02")),
+    anti_slt_expo = make_expo(., c("G201A","G201B","G201C","G201D","G201E","G201F","G201G","G201H","G201I","G02A")),
+
+    anti_cig_expo_label = factor(anti_cig_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-cigarette media",
+                                            "Exposed to anti-cigarette media")),
+    anti_slt_expo_label = factor(anti_slt_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-SLT media",
+                                            "Exposed to anti-SLT media"))
+  )
+```
+
+
+```{r}
+# ---- Demographics ---------------------------------------------------------------
+in_clean <- in_clean %>%
+  mutate(
+    age_group = case_when(
+      AGE >= 15 & AGE <= 24 ~ "15-24",
+      AGE >= 25 & AGE <= 44 ~ "25-44",
+      AGE >= 45 & AGE <= 64 ~ "45-64",
+      AGE >= 65             ~ "65+",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("15-24","25-44","45-64","65+")),
+
+    gender = case_when(
+      A01 == 1 ~ "Male",
+      A01 == 2 ~ "Female"
+    ),
+
+    # Collapsed to 3 categories — matches Pakistan
+    education = case_when(
+      A04 == 1               ~ "No Education",
+      A04 %in% c(2, 3, 4)    ~ "Primary or Less",
+      A04 %in% c(5, 6, 7, 8) ~ "Secondary or above",
+      TRUE                   ~ NA_character_
+    ),
+
+    # Collapsed to 2 categories (self-employed folded into Employed) — matches Pakistan
+    employment = case_when(
+      A05 %in% c(1, 2, 3, 4)      ~ "Employed",          # Govt + Non-govt + Daily wage + Self-employed
+      A05 %in% c(5, 6, 7, 8, 9) ~ "Not Working",       # Student/Homemaker/Retired/Unemployed
+      TRUE ~ NA_character_
+    ),
+
+    residence_label = case_when(
+      Residence == 1 ~ "Urban",
+      Residence == 2 ~ "Rural",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Check demographic variables
+in_clean %>%
+  summarise(
+    n = n(),
+    n_gender = n_distinct(gender, na.rm = TRUE),
+    n_education = n_distinct(education, na.rm = TRUE),
+    n_residence = n_distinct(residence_label, na.rm = TRUE),
+    n_employment = n_distinct(employment, na.rm = TRUE)
+  )
+```
+
+```{r}
+# ---- Survey Design (rename GATSSTRATA -> gatsstrata for pooling consistency) --
+in_clean <- in_clean %>% rename(gatsstrata = GATSSTRATA)
+
+in_design <- svydesign(
+  id = ~gatscluster,
+  strata = ~gatsstrata,
+  weights = ~gatsweight,
+  data = in_clean,
+  nest = TRUE
+)
+```
+
+```{r}
+in_clean %>% count(user3)
+```
+
+```{r}
+# ==============================================================================
+# TABLE 1: DEMOGRAPHIC CHARACTERISTICS BY TOBACCO USER TYPE — INDIA
+# ==============================================================================
+# NOTE: reuses get_demo_counts_user3(), get_weighted_colpct_user3(), get_table1_pval()
+# from the Pakistan chunk — cats now match Pakistan's ("Smoker","Smokeless","Dual")
+# India-specific demo_vars/var_labels used here since India's residence column
+# is named "residence_label", not "residence" (as in Pakistan)
+
+demo_vars_in <- c("gender","age_group","education","employment","residence_label")
+
+var_labels_in <- c(
+  gender          = "Gender",
+  age_group       = "Age group",
+  education       = "Education",
+  employment      = "Employment",
+  residence_label = "Residence"
+)
+
+cats <- c("Smoker","Smokeless","Dual")   # <-- was "Others"; now matches Pakistan
+stopifnot(all(na.omit(unique(as.character(in_clean$user3))) %in% cats))
+in_clean <- in_clean %>% mutate(user3 = factor(user3, levels = cats))
+
+table1_counts_in   <- bind_rows(lapply(demo_vars_in, function(v) get_demo_counts_user3(in_clean, v)))
+table1_weighted_in <- bind_rows(lapply(demo_vars_in, function(v) get_weighted_colpct_user3(in_design, v)))
+
+table1_pvals_in <- bind_rows(lapply(demo_vars_in, function(v) get_table1_pval(in_design, v))) %>%
+  mutate(Variable = dplyr::recode(Variable, !!!var_labels_in))
+
+table1_joined_in <- table1_counts_in %>%
+  left_join(table1_weighted_in, by = c("Variable","Category")) %>%
+  mutate(
+    across(ends_with("_pct"), ~replace_na(., 0)),
+    across(ends_with("_se"), ~replace_na(., 0)),
+    Variable = dplyr::recode(Variable, !!!var_labels_in)
+  ) %>%
+  arrange(factor(Variable, levels = unname(var_labels_in)), Category) %>%
+  left_join(table1_pvals_in, by = "Variable") %>%
+  group_by(Variable) %>%
+  mutate(
+    p        = if_else(row_number() == 1, p, ""),
+    Variable = if_else(row_number() == 1, Variable, "")
+  ) %>%
+  ungroup()
+
+n_user3_in <- in_clean %>% filter(!is.na(user3)) %>% nrow()
+
+table1_disp_in <- table1_joined_in %>%
+  mutate(
+    Smoker_pctSE    = fmt_pct_se(Smoker_pct,    Smoker_se),
+    Smokeless_pctSE = fmt_pct_se(Smokeless_pct, Smokeless_se),
+    Dual_pctSE      = fmt_pct_se(Dual_pct,      Dual_se)
+  ) %>%
+  select(Variable, Category, Category_Total,
+         Smoker, Smoker_pctSE, Smokeless, Smokeless_pctSE, Dual, Dual_pctSE, p)
+
+table1_disp_in %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1. Demographic characteristics by tobacco user type for India",
+    subtitle = paste0(
+      "Unweighted counts and survey-weighted column percentages (SE). ",
+      "Analysis limited to non-missing user type (N = ", format(n_user3_in, big.mark=","), ")."
+    )
+  ) %>%
+  cols_label(
+    Variable = "Variable", Category = "Category", Category_Total = "Row Total",
+    Smoker = "n", Smoker_pctSE = "% (SE)",
+    Smokeless = "n", Smokeless_pctSE = "% (SE)",
+    Dual = "n", Dual_pctSE = "% (SE)", p = "p-value"
+  ) %>%
+  tab_spanner(label = "Smoker", id = "sp_Smoker", columns = c(Smoker, Smoker_pctSE)) %>%
+  tab_spanner(label = "Smokeless", id = "sp_Smokeless", columns = c(Smokeless, Smokeless_pctSE)) %>%
+  tab_spanner(label = "Dual", id = "sp_Dual", columns = c(Dual, Dual_pctSE)) %>%
+  fmt_number(columns = c(Category_Total, Smoker, Smokeless, Dual), decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Note: Percentages are survey-weighted column percentages within each user type. 'Dual' refers to respondents who currently use both smoked and smokeless tobacco. p-values from design-adjusted (Rao-Scott) chi-square tests comparing smokers with smokeless tobacco users; dual users excluded owing to small cell sizes.")
+```
+
+```{r}
+# ==============================================================================
+# SUBSET TO CURRENT USERS + SET REFERENCE LEVELS (mirrors Pakistan)
+# ==============================================================================
+
+ensure_levels_in <- function(des) {
+  update(
+    des,
+    age_group  = factor(age_group, levels = c("15-24","25-44","45-64","65+")),
+    gender     = factor(gender, levels = c("Female","Male")),
+    education  = factor(education, levels = c("No Education","Primary or Less","Secondary or above")),
+    residence_label = factor(residence_label, levels = c("Rural","Urban")),
+    employment = factor(employment, levels = c("Not Working","Employed"))
+  )
+}
+smoker_types_in <- c("Smoker only", "Dual: Smoker + Smokeless")
+slt_types_in    <- c("Smokeless only", "Dual: Smoker + Smokeless")
+
+smokers_in <- subset(in_design, user_type %in% smoker_types_in) %>% ensure_levels_in()
+slt_in     <- subset(in_design, user_type %in% slt_types_in)    %>% ensure_levels_in()
+
+cat("Smokers (India):", nrow(smokers_in$variables), "\n")
+cat("SLT users (India):", nrow(slt_in$variables), "\n")
+```
+
+```{r}
+# ==============================================================================
+# MODELS — SMOKING & SMOKELESS (India), dual_use included as covariate
+# ==============================================================================
+
+model_smk_attempt_in <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_in, family = binomial(link = "logit")
+)
+model_smk_intent_in <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_in, family = binomial(link = "logit")
+)
+model_slt_attempt_in <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_in, family = binomial(link = "logit")
+)
+model_slt_intent_in <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_in, family = binomial(link = "logit")
+)
+
+summary(model_smk_attempt_in)
+summary(model_smk_intent_in)
+summary(model_slt_attempt_in)
+summary(model_slt_intent_in)
+```
+
+```{r}
+# ==============================================================================
+# TABLE 4 & 5 — INDIA (reuses build_pk_or_table from Pakistan chunk)
+# ==============================================================================
+
+build_pk_or_table(
+  model_attempt  = model_smk_attempt_in,
+  model_intent   = model_smk_intent_in,
+  exposure_term  = "anti_cig_expo",
+  exposure_label = "Exposed to Anti-Cigarette Media/HWL",
+  table_num      = 4,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among smokers, India GATS 2016",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_smk_attempt_in$y), "; quit intention model N = ", length(model_smk_intent_in$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+
+build_pk_or_table(
+  model_attempt  = model_slt_attempt_in,
+  model_intent   = model_slt_intent_in,
+  exposure_term  = "anti_slt_expo",
+  exposure_label = "Exposed to Anti-SLT Media/HWL",
+  table_num      = 5,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among SLT users, India GATS 2016",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_slt_attempt_in$y), "; quit intention model N = ", length(model_slt_intent_in$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+```
+
+```{r}
+# ==============================================================================
+# TABLES 2 & 3 — ANTI-CIG / ANTI-SLT EXPOSURE BY SOCIODEMOGRAPHIC GROUP (India)
+# ==============================================================================
+# NOTE: reuses exposure_by_demo() from the pooled/Pakistan chunk
+
+table2_in <- exposure_by_demo(smokers_in, "anti_cig_expo", demo_vars_in, var_labels_in)
+table3_in <- exposure_by_demo(slt_in, "anti_slt_expo", demo_vars_in, var_labels_in)
+
+table2_in
+table3_in
+
+cat("Table 2 (anti-cigarette among smokers, India) N =",
+    sum(!is.na(smokers_in$variables$anti_cig_expo)), "\n")
+cat("Table 3 (anti-SLT among SLT users, India) N =",
+    sum(!is.na(slt_in$variables$anti_slt_expo)), "\n")
+```
+
+```{r}
+# ==============================================================================
+# FLOW DIAGRAM NUMBERS — INDIA
+# ==============================================================================
+
+n_total_in <- nrow(GATS_IND_raw)
+
+tobacco_user_flow_in <- GATS_IND_raw %>%
+  mutate(
+    smoker_flow = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06B, B06C, B06E, B06F, B06G,
+                         B10A, B10B, B10C, B10E, B10F, B10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless_flow = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D, C06E, C06F, C06G,
+                         C10A, C10B, C10C, C10D, C10E, C10F, C10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    any_tobacco_user = if_else(smoker_flow == 1 | smokeless_flow == 1, 1, 0)
+  )
+
+n_any_user_in <- sum(tobacco_user_flow_in$any_tobacco_user)
+cat("India — Current tobacco user:", n_any_user_in,
+    sprintf("(%.1f%% of total)", 100 * n_any_user_in / n_total_in), "\n")
+
+n_analytic_in <- tobacco_user_flow_in %>%
+  filter(any_tobacco_user == 1) %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(in_media_smoke_cols, in_hwl_smoke_col,
+                     in_media_slt_cols, in_hwl_slt_col)), is.na)
+  ) %>%
+  nrow()
+
+cat("India — Analytic sample:", n_analytic_in,
+    sprintf("(%.1f%% of tobacco users)", 100 * n_analytic_in / n_any_user_in), "\n")
+cat("India — Excluded tobacco users:", n_any_user_in - n_analytic_in, "\n")
+
+cat("Model N (India smoking quit attempt):   ", length(model_smk_attempt_in$y), "\n")
+cat("Model N (India smoking quit intention): ", length(model_smk_intent_in$y), "\n")
+cat("Model N (India SLT quit attempt):       ", length(model_slt_attempt_in$y), "\n")
+cat("Model N (India SLT quit intention):     ", length(model_slt_intent_in$y), "\n")
+
+# ==============================================================================
+# OVERALL EXPOSURE + QUIT RATES — INDIA (mirrors Pakistan's rates() calls)
+# ==============================================================================
+
+rates <- function(design, var) {
+  d <- subset(design, !is.na(design$variables[[var]]))
+  e <- svyciprop(as.formula(paste0("~", var)), d, method = "logit")
+  data.frame(variable = var, n = nrow(d$variables),
+             pct = round(as.numeric(e) * 100, 1),
+             lo  = round(confint(e)[1] * 100, 1),
+             hi  = round(confint(e)[2] * 100, 1))
+}
+
+bind_rows(
+  rates(smokers_in, "anti_cig_expo"),
+  rates(slt_in,     "anti_slt_expo"),
+  rates(smokers_in, "quit_smoking"),
+  rates(smokers_in, "quit_smoking_intent"),
+  rates(slt_in,     "quit_smokeless"),
+  rates(slt_in,     "quit_slt_intent")
+)
+```
+
+BANGLADESH
+
+```{r}
+dim(GATS_BA_raw) 
+```
+
+```{r}
+# ---- Variable Mapping --------------------------------------------------------
+ba_media_smoke_cols <- c("G01AA1", "G01AB1", "G01B1", "G01C1", "G01D1", "G01DD1", "G01E1")
+ba_media_slt_cols   <- c("G01AA3", "G01AB3", "G01B3", "G01C3", "G01D3", "G01DD3", "G01E3")
+ba_hwl_smoke_col     <- "G02"
+ba_hwl_slt_col       <- "G02A"
+
+# ---- Filter to Analysis Sample -----------------------------------------------
+ba_clean <- GATS_BA_raw %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(ba_media_smoke_cols, ba_hwl_smoke_col,
+                     ba_media_slt_cols,   ba_hwl_slt_col)), is.na)
+  )
+dim(ba_clean)
+```
+
+```{r}
+# ---- Quit Attempts ------------------------------------------------------------
+ba_clean <- ba_clean %>%
+  mutate(
+    quit_smoking = case_when(
+      D01 == 1 ~ 1,
+      D01 == 2 ~ 0,
+      D01 == 9 | is.na(D01) ~ NA_real_
+    ),
+    quit_smokeless = case_when(
+      D09 == 1 ~ 1,
+      D09 == 2 ~ 0,
+      D09 == 9 | is.na(D09) ~ NA_real_
+    )
+  )
+```
+
+```{r}
+# ---- Quit Intentions -----------------------------------------------------------
+ba_clean <- ba_clean %>%
+  mutate(
+    quit_smoking_intent = case_when(
+      D08 %in% c(1, 2) ~ 1,
+      D08 %in% c(3, 4) ~ 0,
+      D08 %in% c(7, 9) | is.na(D08) ~ NA_real_
+    ),
+    quit_slt_intent = case_when(
+      D16 %in% c(1, 2) ~ 1,
+      D16 %in% c(3, 4) ~ 0,
+      D16 %in% c(7, 9) | is.na(D16) ~ NA_real_
+    )
+  )
+```
+
+
+```{r}
+# ---- Tobacco User Type (RESTRICTED to Smoker / Smokeless / Dual, matching Pakistan) ----
+ba_clean <- ba_clean %>%
+  mutate(
+    smoker = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06H, B06F, B06B, B06D, B06E, B06G,
+                         B10A, B10H, B10F, B10B, B10D, B10E, B10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D, C06E, C06F, C06G,
+                         C10A, C10B, C10C, C10D, C10E, C10F, C10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+
+    # NOTE: e-cigarette kept only as diagnostic indicator — NOT used in user_type
+    ecigarette = if_else(EC2 %in% c(1, 2), 1, 0, missing = 0),
+
+    # Restricted 3-category classification — mirrors Pakistan exactly
+    user_type = case_when(
+      smoker == 1 & smokeless == 1 ~ "Dual: Smoker + Smokeless",
+      smoker == 1                  ~ "Smoker only",
+      smokeless == 1               ~ "Smokeless only",
+      TRUE                         ~ NA_character_   # e-cig-only/non-users excluded
+    ),
+user3 = case_when(
+      user_type == "Smoker only"              ~ "Smoker",
+      user_type == "Smokeless only"           ~ "Smokeless",
+      user_type == "Dual: Smoker + Smokeless" ~ "Dual"
+    ),
+    dual_use = if_else(user_type == "Dual: Smoker + Smokeless", 1L, 0L)
+  )
+
+# User type distribution
+ba_clean %>%
+  count(user_type, name = "n", sort = TRUE) %>%
+  mutate(pct = round(100 * n / sum(n), 2))
+
+# Diagnostic: how many e-cig-only/non-users now excluded?
+ba_clean %>%
+  filter(is.na(user_type)) %>%
+  summarise(n = n(), pct_of_sample = round(100 * n / nrow(ba_clean), 2))
+```
+
+
+```{r}
+# ---- Anti-Tobacco Exposure (using make_expo — consistent with Pakistan) -------
+ba_clean <- ba_clean %>%
+  mutate(
+    anti_tob_expo = make_expo(., c("G01AA1","G01AB1","G01B1","G01C1","G01D1","G01DD1","G01E1","G02",
+                                   "G01AA3","G01AB3","G01B3","G01C3","G01D3","G01DD3","G01E3","G02A")),
+    anti_cig_expo = make_expo(., c("G01AA1","G01AB1","G01B1","G01C1","G01D1","G01DD1","G01E1","G02")),
+    anti_slt_expo = make_expo(., c("G01AA3","G01AB3","G01B3","G01C3","G01D3","G01DD3","G01E3","G02A")),
+
+    anti_cig_expo_label = factor(anti_cig_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-cigarette media",
+                                            "Exposed to anti-cigarette media")),
+    anti_slt_expo_label = factor(anti_slt_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-SLT media",
+                                            "Exposed to anti-SLT media"))
+  )
+```
+
+
+```{r}
+# ---- Demographics ---------------------------------------------------------------
+ba_clean <- ba_clean %>%
+  mutate(
+    age_group = case_when(
+      AGE >= 15 & AGE <= 24 ~ "15-24",
+      AGE >= 25 & AGE <= 44 ~ "25-44",
+      AGE >= 45 & AGE <= 64 ~ "45-64",
+      AGE >= 65             ~ "65+",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("15-24","25-44","45-64","65+")),
+
+    # Collapsed to 3 categories — matches Pakistan
+    education = case_when(
+      A04 == 1               ~ "No Education",
+      A04 %in% c(2, 3, 4)    ~ "Primary or Less",
+      A04 %in% c(5, 6, 7, 8) ~ "Secondary or above",
+      TRUE ~ NA_character_
+    ),
+
+    # Collapsed to 2 categories (self-employed folded into Employed) — matches Pakistan
+    employment = case_when(
+      A05 %in% c(1, 2, 3, 4, 5, 6, 7, 8, 9, 12)          ~ "Employed",     # Gov/Non-gov/Industrial/Daily laborer + Business/Farming/Agri worker/Other self-employed/Paid domestic
+      A05 %in% c(10, 11, 13, 14, 15, 16)         ~ "Not Working",  # Student/Homemaker/Retired/Unemployed/Other
+      TRUE ~ NA_character_
+    ),
+
+    gender = case_when(
+      A01 == 1 ~ "Male",
+      A01 == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    residence_label = case_when(
+      RESIDENCE == 1 ~ "Urban",
+      RESIDENCE == 2 ~ "Rural",
+      TRUE ~ NA_character_
+    )
+  )
+# Check demographic variables
+ba_clean %>%
+  summarise(
+    n = n(),
+    n_gender = n_distinct(gender, na.rm = TRUE),
+    n_education = n_distinct(education, na.rm = TRUE),
+    n_residence = n_distinct(residence_label, na.rm = TRUE),
+    n_employment = n_distinct(employment, na.rm = TRUE)
+  )
+```
+START ADDING MORE CODE from claude from here and re-check BA collapsed categories!!
+```{r}
+# ---- Survey Design ------------------------------------------------------------
+ba_design <- svydesign(
+  id = ~gatscluster,
+  strata = ~gatsstrata,
+  weights = ~gatsweight,
+  data = ba_clean,
+  nest = TRUE
+)
+```
+
+```{r}
+ba_clean %>% count(user3)
+```
+
+```{r}
+# ==============================================================================
+# TABLE 1: DEMOGRAPHIC CHARACTERISTICS BY TOBACCO USER TYPE — BANGLADESH
+# ==============================================================================
+# NOTE: reuses get_demo_counts_user3(), get_weighted_colpct_user3(), get_table1_pval()
+# from the Pakistan chunk — cats now match Pakistan's ("Smoker","Smokeless","Dual")
+# Bangladesh-specific demo_vars/var_labels used since Bangladesh's residence column
+# is named "residence_label", not "residence" (as in Pakistan)
+
+demo_vars_ba <- c("gender","age_group","education","employment","residence_label")
+
+var_labels_ba <- c(
+  gender          = "Gender",
+  age_group       = "Age group",
+  education       = "Education",
+  employment      = "Employment",
+  residence_label = "Residence"
+)
+
+cats <- c("Smoker","Smokeless","Dual")   # <-- was "Others"; now matches Pakistan
+stopifnot(all(na.omit(unique(as.character(ba_clean$user3))) %in% cats))
+ba_clean <- ba_clean %>% mutate(user3 = factor(user3, levels = cats))
+
+table1_counts_ba   <- bind_rows(lapply(demo_vars_ba, function(v) get_demo_counts_user3(ba_clean, v)))
+table1_weighted_ba <- bind_rows(lapply(demo_vars_ba, function(v) get_weighted_colpct_user3(ba_design, v)))
+
+table1_pvals_ba <- bind_rows(lapply(demo_vars_ba, function(v) get_table1_pval(ba_design, v))) %>%
+  mutate(Variable = dplyr::recode(Variable, !!!var_labels_ba))
+
+table1_joined_ba <- table1_counts_ba %>%
+  left_join(table1_weighted_ba, by = c("Variable","Category")) %>%
+  mutate(
+    across(ends_with("_pct"), ~replace_na(., 0)),
+    across(ends_with("_se"), ~replace_na(., 0)),
+    Variable = dplyr::recode(Variable, !!!var_labels_ba)
+  ) %>%
+  arrange(factor(Variable, levels = unname(var_labels_ba)), Category) %>%
+  left_join(table1_pvals_ba, by = "Variable") %>%
+  group_by(Variable) %>%
+  mutate(
+    p        = if_else(row_number() == 1, p, ""),
+    Variable = if_else(row_number() == 1, Variable, "")
+  ) %>%
+  ungroup()
+
+n_user3_ba <- ba_clean %>% filter(!is.na(user3)) %>% nrow()
+
+table1_disp_ba <- table1_joined_ba %>%
+  mutate(
+    Smoker_pctSE    = fmt_pct_se(Smoker_pct,    Smoker_se),
+    Smokeless_pctSE = fmt_pct_se(Smokeless_pct, Smokeless_se),
+    Dual_pctSE      = fmt_pct_se(Dual_pct,      Dual_se)
+  ) %>%
+  select(Variable, Category, Category_Total,
+         Smoker, Smoker_pctSE, Smokeless, Smokeless_pctSE, Dual, Dual_pctSE, p)
+
+table1_disp_ba %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1. Demographic characteristics by tobacco user type for Bangladesh",
+    subtitle = paste0(
+      "Unweighted counts and survey-weighted column percentages (SE). ",
+      "Analysis limited to non-missing user type (N = ", format(n_user3_ba, big.mark=","), ")."
+    )
+  ) %>%
+  cols_label(
+    Variable = "Variable", Category = "Category", Category_Total = "Row Total",
+    Smoker = "n", Smoker_pctSE = "% (SE)",
+    Smokeless = "n", Smokeless_pctSE = "% (SE)",
+    Dual = "n", Dual_pctSE = "% (SE)", p = "p-value"
+  ) %>%
+  tab_spanner(label = "Smoker", id = "sp_Smoker", columns = c(Smoker, Smoker_pctSE)) %>%
+  tab_spanner(label = "Smokeless", id = "sp_Smokeless", columns = c(Smokeless, Smokeless_pctSE)) %>%
+  tab_spanner(label = "Dual", id = "sp_Dual", columns = c(Dual, Dual_pctSE)) %>%
+  fmt_number(columns = c(Category_Total, Smoker, Smokeless, Dual), decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Note: Percentages are survey-weighted column percentages within each user type. 'Dual' refers to respondents who currently use both smoked and smokeless tobacco. p-values from design-adjusted (Rao-Scott) chi-square tests comparing smokers with smokeless tobacco users; dual users excluded owing to small cell sizes. Data: GATS Bangladesh 2017.")
+```
+
+
+```{r}
+ensure_levels_ba <- function(des) {
+  update(
+    des,
+    age_group  = factor(age_group, levels = c("15-24","25-44","45-64","65+")),
+    gender     = factor(gender, levels = c("Female","Male")),
+    education  = factor(education, levels = c("No Education","Primary or Less","Secondary or above")),
+    residence_label = factor(residence_label, levels = c("Rural","Urban")),
+    employment = factor(employment, levels = c("Not Working","Employed"))
+  )
+}
+
+smoker_types_ba <- c("Smoker only", "Dual: Smoker + Smokeless")
+slt_types_ba    <- c("Smokeless only", "Dual: Smoker + Smokeless")
+
+smokers_ba <- subset(ba_design, user_type %in% smoker_types_ba) %>% ensure_levels_ba()
+slt_ba     <- subset(ba_design, user_type %in% slt_types_ba)    %>% ensure_levels_ba()
+
+cat("Smokers (Bangladesh):", nrow(smokers_ba$variables), "\n")
+cat("SLT users (Bangladesh):", nrow(slt_ba$variables), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# MODELS — SMOKING & SMOKELESS (Bangladesh), dual_use included as covariate
+# ==============================================================================
+
+model_smk_attempt_ba <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_ba, family = binomial(link = "logit")
+)
+model_smk_intent_ba <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_ba, family = binomial(link = "logit")
+)
+model_slt_attempt_ba <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_ba, family = binomial(link = "logit")
+)
+model_slt_intent_ba <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_ba, family = binomial(link = "logit")
+)
+
+summary(model_smk_attempt_ba)
+summary(model_smk_intent_ba)
+summary(model_slt_attempt_ba)
+summary(model_slt_intent_ba)
+```
+
+```{r}
+# ==============================================================================
+# TABLE 4 & 5 — BANGLADESH (reuses build_pk_or_table from Pakistan chunk)
+# ==============================================================================
+
+build_pk_or_table(
+  model_attempt  = model_smk_attempt_ba,
+  model_intent   = model_smk_intent_ba,
+  exposure_term  = "anti_cig_expo",
+  exposure_label = "Exposed to Anti-Cigarette Media/HWL",
+  table_num      = 4,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among smokers, Bangladesh GATS 2017",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_smk_attempt_ba$y), "; quit intention model N = ", length(model_smk_intent_ba$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+
+build_pk_or_table(
+  model_attempt  = model_slt_attempt_ba,
+  model_intent   = model_slt_intent_ba,
+  exposure_term  = "anti_slt_expo",
+  exposure_label = "Exposed to Anti-SLT Media/HWL",
+  table_num      = 5,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among SLT users, Bangladesh GATS 2017",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_slt_attempt_ba$y), "; quit intention model N = ", length(model_slt_intent_ba$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+```
+
+
+
+```{r}
+# ==============================================================================
+# TABLES 2 & 3 — ANTI-CIG / ANTI-SLT EXPOSURE BY SOCIODEMOGRAPHIC GROUP (Bangladesh)
+# ==============================================================================
+
+table2_ba <- exposure_by_demo(smokers_ba, "anti_cig_expo", demo_vars_ba, var_labels_ba)
+table3_ba <- exposure_by_demo(slt_ba, "anti_slt_expo", demo_vars_ba, var_labels_ba)
+
+table2_ba
+table3_ba
+
+cat("Table 2 (anti-cigarette among smokers, Bangladesh) N =",
+    sum(!is.na(smokers_ba$variables$anti_cig_expo)), "\n")
+cat("Table 3 (anti-SLT among SLT users, Bangladesh) N =",
+    sum(!is.na(slt_ba$variables$anti_slt_expo)), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# FLOW DIAGRAM NUMBERS — BANGLADESH
+# ==============================================================================
+
+n_total_ba <- nrow(GATS_BA_raw)
+
+tobacco_user_flow_ba <- GATS_BA_raw %>%
+  mutate(
+    smoker_flow = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06H, B06F, B06B, B06D, B06E, B06G,
+                         B10A, B10H, B10F, B10B, B10D, B10E, B10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless_flow = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D, C06E, C06F, C06G,
+                         C10A, C10B, C10C, C10D, C10E, C10F, C10G),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    any_tobacco_user = if_else(smoker_flow == 1 | smokeless_flow == 1, 1, 0)
+  )
+
+n_any_user_ba <- sum(tobacco_user_flow_ba$any_tobacco_user)
+cat("Bangladesh — Current tobacco user:", n_any_user_ba,
+    sprintf("(%.1f%% of total)", 100 * n_any_user_ba / n_total_ba), "\n")
+n_any_user_ba <- sum(tobacco_user_flow_ba$any_tobacco_user)
+cat("Bangladesh — Current tobacco user:", n_any_user_ba,
+    sprintf("(%.1f%% of total)", 100 * n_any_user_ba / n_total_ba), "\n")
+
+n_analytic_ba <- tobacco_user_flow_ba %>%
+  filter(any_tobacco_user == 1) %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(ba_media_smoke_cols, ba_hwl_smoke_col,
+                     ba_media_slt_cols, ba_hwl_slt_col)), is.na)
+  ) %>%
+  nrow()
+
+cat("Bangladesh — Analytic sample:", n_analytic_ba,
+    sprintf("(%.1f%% of tobacco users)", 100 * n_analytic_ba / n_any_user_ba), "\n")
+cat("Bangladesh — Excluded tobacco users:", n_any_user_ba - n_analytic_ba, "\n")
+
+cat("Model N (Bangladesh smoking quit attempt):   ", length(model_smk_attempt_ba$y), "\n")
+cat("Model N (Bangladesh smoking quit intention): ", length(model_smk_intent_ba$y), "\n")
+cat("Model N (Bangladesh SLT quit attempt):       ", length(model_slt_attempt_ba$y), "\n")
+cat("Model N (Bangladesh SLT quit intention):     ", length(model_slt_intent_ba$y), "\n")
+
+```
+
+
+```{r}
+# ==============================================================================
+# OVERALL EXPOSURE + QUIT RATES — BANGLADESH
+# ==============================================================================
+
+bind_rows(
+  rates(smokers_ba, "anti_cig_expo"),
+  rates(slt_ba,     "anti_slt_expo"),
+  rates(smokers_ba, "quit_smoking"),
+  rates(smokers_ba, "quit_smoking_intent"),
+  rates(slt_ba,     "quit_smokeless"),
+  rates(slt_ba,     "quit_slt_intent")
+)
+```
+
+SRI LANKA 
+
+```{r}
+dim(GATS_SL_raw ) 
+```
+
+```{r}
+# ==============================================================================
+# SRI LANKA 
+# ==============================================================================
+
+
+# ---- Variable Mapping --------------------------------------------------------
+sl_media_smoke_cols <- c("G201A1", "G201B1", "G201C1", "G201D1", "G201E1", "G201F1")
+sl_media_slt_cols   <- c("G201A3", "G201B3", "G201C3", "G201D3", "G201E3", "G201F3")
+sl_hwl_smoke_col     <- "G202A"
+sl_hwl_bidi_col      <- "G202B"
+sl_hwl_slt_col       <- "G202C"
+```
+
+
+```{r}
+# ---- Filter to Analysis Sample -----------------------------------------------
+sl_clean <- GATS_SL_raw %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(sl_media_smoke_cols, sl_hwl_smoke_col,
+                     sl_media_slt_cols,   sl_hwl_slt_col)), is.na)
+  )
+dim(sl_clean)
+```
+
+
+```{r}
+# ---- Quit Attempts ------------------------------------------------------------
+sl_clean <- sl_clean %>%
+  mutate(
+    quit_smoking = case_when(
+      D01 == 1 ~ 1,
+      D01 == 2 ~ 0,
+      D01 == 9 | is.na(D01) ~ NA_real_
+    ),
+    quit_smokeless = case_when(
+      D09 == 1 ~ 1,
+      D09 == 2 ~ 0,
+      D09 == 9 | is.na(D09) ~ NA_real_
+    )
+  )
+```
+
+
+```{r}
+# ---- Quit Intentions -----------------------------------------------------------
+sl_clean <- sl_clean %>%
+  mutate(
+    quit_smoking_intent = case_when(
+      D08 %in% c(1, 2) ~ 1,
+      D08 %in% c(3, 4) ~ 0,
+      D08 %in% c(7, 9) | is.na(D08) ~ NA_real_
+    ),
+    quit_slt_intent = case_when(
+      D16 %in% c(1, 2) ~ 1,
+      D16 %in% c(3, 4) ~ 0,
+      D16 %in% c(7, 9) | is.na(D16) ~ NA_real_
+    )
+  )
+```
+
+
+```{r}
+# ---- Tobacco User Type (already Smoker/Smokeless/Dual only — no waterpipe/e-cig module) ----
+sl_clean <- sl_clean %>%
+  mutate(
+    smoker = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06B, B06C, B06D,
+                         B10A, B10B, B10C, B10D),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D,
+                         C10A, C10B, C10C, C10D),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+
+    # Restricted classification — mirrors Pakistan exactly (was already close;
+    # "Non-user" now becomes NA rather than its own category)
+    user_type = case_when(
+      smoker == 1 & smokeless == 1 ~ "Dual: Smoker + Smokeless",
+      smoker == 1                  ~ "Smoker only",
+      smokeless == 1               ~ "Smokeless only",
+      TRUE                         ~ NA_character_   # non-users excluded
+    ),
+
+    user3 = case_when(
+      user_type == "Smoker only"              ~ "Smoker",
+      user_type == "Smokeless only"           ~ "Smokeless",
+      user_type == "Dual: Smoker + Smokeless" ~ "Dual"
+    ),
+    dual_use = if_else(user_type == "Dual: Smoker + Smokeless", 1L, 0L)
+  )
+
+# User type distribution
+sl_clean %>%
+  count(user_type, name = "n", sort = TRUE) %>%
+  mutate(pct = round(100 * n / sum(n), 2))
+
+# Diagnostic: how many non-users now excluded?
+sl_clean %>%
+  filter(is.na(user_type)) %>%
+  summarise(n = n(), pct_of_sample = round(100 * n / nrow(sl_clean), 2))
+```
+
+
+```{r}
+# ---- Anti-Tobacco Exposure (using make_expo — consistent with Pakistan) -------
+# NOTE: Sri Lanka's HWL columns are split by product: G202A (cig), G202B (bidi), G202C (SLT)
+sl_clean <- sl_clean %>%
+  mutate(
+    anti_tob_expo = make_expo(., c("G201A1","G201B1","G201C1","G201D1","G201E1","G201F1","G202A","G202B",
+                                   "G201A3","G201B3","G201C3","G201D3","G201E3","G201F3","G202C")),
+    anti_cig_expo = make_expo(., c("G201A1","G201B1","G201C1","G201D1","G201E1","G201F1","G202A")),
+    anti_slt_expo = make_expo(., c("G201A3","G201B3","G201C3","G201D3","G201E3","G201F3","G202C")),
+
+    anti_cig_expo_label = factor(anti_cig_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-cigarette media",
+                                            "Exposed to anti-cigarette media")),
+    anti_slt_expo_label = factor(anti_slt_expo, levels = c(0,1),
+                                 labels = c("Not exposed to anti-SLT media",
+                                            "Exposed to anti-SLT media"))
+  )
+```
+
+
+```{r}
+# ---- Demographics ---------------------------------------------------------------
+sl_clean <- sl_clean %>%
+  mutate(
+    age_group = case_when(
+      AGE >= 15 & AGE <= 24 ~ "15-24",
+      AGE >= 25 & AGE <= 44 ~ "25-44",
+      AGE >= 45 & AGE <= 64 ~ "45-64",
+      AGE >= 65             ~ "65+",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("15-24","25-44","45-64","65+")),
+
+    # Collapsed to 3 categories — matches Pakistan
+    education = case_when(
+      A04 == 1            ~ "No Education",
+      A04 %in% c(2, 3, 4) ~ "Primary or Less",
+      A04 %in% c(5, 6, 7, 8) ~ "Secondary or above",
+      TRUE ~ NA_character_
+    ),
+
+    # Collapsed to 2 categories (self-employed folded into Employed) — matches Pakistan
+    employment = case_when(
+      A05 %in% c(1, 2, 3)       ~ "Employed",       # Govt + Non-govt + Self-employed
+      A05 %in% c(4, 5, 6, 7, 8) ~ "Not Working",
+      TRUE ~ NA_character_
+    ),
+
+ gender = case_when(
+      A01 == 1 ~ "Male",
+      A01 == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    residence_label = case_when(
+      residence == 1 ~ "Urban",
+      residence == 2 ~ "Rural",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Check demographic variables
+sl_clean %>%
+  summarise(
+    n = n(),
+    n_gender = n_distinct(gender, na.rm = TRUE),
+    n_education = n_distinct(education, na.rm = TRUE),
+    n_residence = n_distinct(residence_label, na.rm = TRUE),
+    n_employment = n_distinct(employment, na.rm = TRUE)
+  )
+
+```
+
+
+```{r}
+# ---- Survey Design ------------------------------------------------------------
+options(survey.lonely.psu = "adjust")
+
+sl_design <- svydesign(
+  id = ~gatscluster,
+  strata = ~gatsstrata,
+  weights = ~gatsweight,
+  data = sl_clean,
+  nest = TRUE
+)
+```
+
+
+```{r}
+sl_clean %>% count(user3)
+```
+
+
+```{r}
+# ==============================================================================
+# TABLE 1: DEMOGRAPHIC CHARACTERISTICS BY TOBACCO USER TYPE — SRI LANKA
+# ==============================================================================
+# Sri Lanka-specific demo_vars/var_labels since column is "residence_label"
+
+demo_vars_sl <- c("gender","age_group","education","employment","residence_label")
+
+var_labels_sl <- c(
+  gender          = "Gender",
+  age_group       = "Age group",
+  education       = "Education",
+  employment      = "Employment",
+  residence_label = "Residence"
+)
+
+cats <- c("Smoker","Smokeless","Dual")   # <-- was "Others"; now matches Pakistan
+
+stopifnot(all(na.omit(unique(as.character(sl_clean$user3))) %in% cats))
+
+sl_clean <- sl_clean %>% mutate(user3 = factor(user3, levels = cats))
+
+table1_counts_sl   <- bind_rows(lapply(demo_vars_sl, function(v) get_demo_counts_user3(sl_clean, v)))
+table1_weighted_sl <- bind_rows(lapply(demo_vars_sl, function(v) get_weighted_colpct_user3(sl_design, v)))
+
+table1_pvals_sl <- bind_rows(lapply(demo_vars_sl, function(v) get_table1_pval(sl_design, v))) %>%
+  mutate(Variable = dplyr::recode(Variable, !!!var_labels_sl))
+
+table1_joined_sl <- table1_counts_sl %>%
+  left_join(table1_weighted_sl, by = c("Variable","Category")) %>%
+  mutate(
+    across(ends_with("_pct"), ~replace_na(., 0)),
+    across(ends_with("_se"), ~replace_na(., 0)),
+    Variable = dplyr::recode(Variable, !!!var_labels_sl)
+  ) %>%
+  arrange(factor(Variable, levels = unname(var_labels_sl)), Category) %>%
+  left_join(table1_pvals_sl, by = "Variable") %>%
+  group_by(Variable) %>%
+  mutate(
+    p        = if_else(row_number() == 1, p, ""),
+    Variable = if_else(row_number() == 1, Variable, "")
+  ) %>%
+  ungroup()
+
+n_user3_sl <- sl_clean %>% filter(!is.na(user3)) %>% nrow()
+table1_disp_sl <- table1_joined_sl %>%
+  mutate(
+    Smoker_pctSE    = fmt_pct_se(Smoker_pct,    Smoker_se),
+    Smokeless_pctSE = fmt_pct_se(Smokeless_pct, Smokeless_se),
+    Dual_pctSE      = fmt_pct_se(Dual_pct,      Dual_se)
+  ) %>%
+  select(Variable, Category, Category_Total,
+         Smoker, Smoker_pctSE, Smokeless, Smokeless_pctSE, Dual, Dual_pctSE, p)
+
+table1_disp_sl %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1. Demographic characteristics by tobacco user type for Sri Lanka",
+    subtitle = paste0(
+      "Unweighted counts and survey-weighted column percentages (SE). ",
+      "Analysis limited to non-missing user type (N = ", format(n_user3_sl, big.mark=","), ")."
+    )
+  ) %>%
+  cols_label(
+    Variable = "Variable", Category = "Category", Category_Total = "Row Total",
+    Smoker = "n", Smoker_pctSE = "% (SE)",
+    Smokeless = "n", Smokeless_pctSE = "% (SE)",
+    Dual = "n", Dual_pctSE = "% (SE)", p = "p-value"
+  ) %>%
+  tab_spanner(label = "Smoker", id = "sp_Smoker", columns = c(Smoker, Smoker_pctSE)) %>%
+  tab_spanner(label = "Smokeless", id = "sp_Smokeless", columns = c(Smokeless, Smokeless_pctSE)) %>%
+  tab_spanner(label = "Dual", id = "sp_Dual", columns = c(Dual, Dual_pctSE)) %>%
+  fmt_number(columns = c(Category_Total, Smoker, Smokeless, Dual), decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Note: Percentages are survey-weighted column percentages within each user type. 'Dual' refers to respondents who currently use both smoked and smokeless tobacco. p-values from design-adjusted (Rao-Scott) chi-square tests comparing smokers with smokeless tobacco users; dual users excluded owing to small cell sizes. Data: GATS Sri Lanka 2019.")
+
+```
+```{r}
+sl_clean %>% count(user3)
+```
+
+
+```{r}
+# ==============================================================================
+# SUBSET TO CURRENT USERS + SET REFERENCE LEVELS (mirrors Pakistan)
+# ==============================================================================
+
+
+ensure_levels_sl <- function(des) {
+  update(
+    des,
+    age_group  = factor(age_group, levels = c("15-24","25-44","45-64","65+")),
+    gender     = factor(gender, levels = c("Female","Male")),
+    education  = factor(education, levels = c("No Education","Primary or Less","Secondary or above")),
+    residence_label = factor(residence_label, levels = c("Rural","Urban")),
+    employment = factor(employment, levels = c("Not Working","Employed"))
+  )
+}
+
+smoker_types_sl <- c("Smoker only", "Dual: Smoker + Smokeless")
+slt_types_sl    <- c("Smokeless only", "Dual: Smoker + Smokeless")
+
+smokers_sl <- subset(sl_design, user_type %in% smoker_types_sl) %>% ensure_levels_sl()
+slt_sl     <- subset(sl_design, user_type %in% slt_types_sl)    %>% ensure_levels_sl()
+
+cat("Smokers (Sri Lanka):", nrow(smokers_sl$variables), "\n")
+cat("SLT users (Sri Lanka):", nrow(slt_sl$variables), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# MODELS — SMOKING & SMOKELESS (Sri Lanka), dual_use included as covariate
+# ==============================================================================
+
+model_smk_attempt_sl <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_sl, family = binomial(link = "logit")
+)
+model_smk_intent_sl <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_sl, family = binomial(link = "logit")
+)
+model_slt_attempt_sl <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_sl, family = binomial(link = "logit")
+)
+model_slt_intent_sl <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_sl, family = binomial(link = "logit")
+)
+
+summary(model_smk_attempt_sl)
+summary(model_smk_intent_sl)
+summary(model_slt_attempt_sl)
+summary(model_slt_intent_sl)
+```
+
+
+```{r}
+# ==============================================================================
+# TABLE 4 & 5 — SRI LANKA (reuses build_pk_or_table from Pakistan chunk)
+# ==============================================================================
+
+build_pk_or_table(
+  model_attempt  = model_smk_attempt_sl,
+  model_intent   = model_smk_intent_sl,
+  exposure_term  = "anti_cig_expo",
+  exposure_label = "Exposed to Anti-Cigarette Media/HWL",
+  table_num      = 4,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among smokers, Sri Lanka GATS 2019",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_smk_attempt_sl$y), "; quit intention model N = ", length(model_smk_intent_sl$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+
+build_pk_or_table(
+  model_attempt  = model_slt_attempt_sl,
+  model_intent   = model_slt_intent_sl,
+  exposure_term  = "anti_slt_expo",
+  exposure_label = "Exposed to Anti-SLT Media/HWL",
+  table_num      = 5,
+  table_title    = "Adjusted odds ratios for quit attempt and quit intention among SLT users, Sri Lanka GATS 2019",
+  footnote_text  = paste0("* p < 0.05; ** p < 0.01; *** p < 0.001. aOR = adjusted odds ratio from survey-weighted logistic regression. Quit attempt model N = ",
+                          length(model_slt_attempt_sl$y), "; quit intention model N = ", length(model_slt_intent_sl$y),
+                          ". Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working.")
+)
+```
+
+
+```{r}
+# ==============================================================================
+# TABLES 2 & 3 — ANTI-CIG / ANTI-SLT EXPOSURE BY SOCIODEMOGRAPHIC GROUP (Sri Lanka)
+# ==============================================================================
+
+table2_sl <- exposure_by_demo(smokers_sl, "anti_cig_expo", demo_vars_sl, var_labels_sl)
+table3_sl <- exposure_by_demo(slt_sl, "anti_slt_expo", demo_vars_sl, var_labels_sl)
+
+table2_sl
+table3_sl
+
+cat("Table 2 (anti-cigarette among smokers, Sri Lanka) N =",
+    sum(!is.na(smokers_sl$variables$anti_cig_expo)), "\n")
+cat("Table 3 (anti-SLT among SLT users, Sri Lanka) N =",
+    sum(!is.na(slt_sl$variables$anti_slt_expo)), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# FLOW DIAGRAM NUMBERS — SRI LANKA
+# ==============================================================================
+
+n_total_sl <- nrow(GATS_SL_raw)
+
+tobacco_user_flow_sl <- GATS_SL_raw %>%
+  mutate(
+    smoker_flow = if_else(
+      B01 %in% c(1, 2) | B03 %in% c(1, 2) |
+        rowSums(across(c(B06A, B06B, B06C, B06D,
+                         B10A, B10B, B10C, B10D),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    smokeless_flow = if_else(
+      C01 %in% c(1, 2) | C03 %in% c(1, 2) |
+        rowSums(across(c(C06A, C06B, C06C, C06D,
+                         C10A, C10B, C10C, C10D),
+                       ~ . > 0 & . < 888), na.rm = TRUE) > 0,
+      1, 0, missing = 0
+    ),
+    any_tobacco_user = if_else(smoker_flow == 1 | smokeless_flow == 1, 1, 0)
+  )
+
+n_any_user_sl <- sum(tobacco_user_flow_sl$any_tobacco_user)
+cat("Sri Lanka — Current tobacco user:", n_any_user_sl,
+    sprintf("(%.1f%% of total)", 100 * n_any_user_sl / n_total_sl), "\n")
+
+n_analytic_sl <- tobacco_user_flow_sl %>%
+  filter(any_tobacco_user == 1) %>%
+  filter(
+    !is.na(D01) | !is.na(D09),
+    !if_all(any_of(c(sl_media_smoke_cols, sl_hwl_smoke_col,
+                     sl_media_slt_cols, sl_hwl_slt_col)), is.na)
+  ) %>%
+  nrow()
+
+cat("Sri Lanka — Analytic sample:", n_analytic_sl,
+    sprintf("(%.1f%% of tobacco users)", 100 * n_analytic_sl / n_any_user_sl), "\n")
+cat("Sri Lanka — Excluded tobacco users:", n_any_user_sl - n_analytic_sl, "\n")
+
+cat("Model N (Sri Lanka smoking quit attempt):   ", length(model_smk_attempt_sl$y), "\n")
+cat("Model N (Sri Lanka smoking quit intention): ", length(model_smk_intent_sl$y), "\n")
+cat("Model N (Sri Lanka SLT quit attempt):       ", length(model_slt_attempt_sl$y), "\n")
+cat("Model N (Sri Lanka SLT quit intention):     ", length(model_slt_intent_sl$y), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# OVERALL EXPOSURE + QUIT RATES — SRI LANKA
+# ==============================================================================
+
+bind_rows(
+  rates(smokers_sl, "anti_cig_expo"),
+  rates(slt_sl,     "anti_slt_expo"),
+  rates(smokers_sl, "quit_smoking"),
+  rates(smokers_sl, "quit_smoking_intent"),
+  rates(slt_sl,     "quit_smokeless"),
+  rates(slt_sl,     "quit_slt_intent")
+)
+```
+
+```{r}
+# ==============================================================================
+# ADD COUNTRY IDENTIFIER TO EACH DATASET
+# ==============================================================================
+
+data_clean <- data_clean %>% mutate(country = "Pakistan")
+in_clean   <- in_clean   %>% mutate(country = "India")
+ba_clean   <- ba_clean   %>% mutate(country = "Bangladesh")
+sl_clean   <- sl_clean   %>% mutate(country = "Sri Lanka")
+
+cat("Pakistan:", nrow(data_clean), " India:", nrow(in_clean),
+    " Bangladesh:", nrow(ba_clean), " Sri Lanka:", nrow(sl_clean), "\n")
+```
+
+
+```{r}
+# ==============================================================================
+# CORE VARIABLES FOR POOLING (dual_use added)
+# ==============================================================================
+
+core_vars <- c(
+  "gatscluster", "gatsstrata", "gatsweight",
+  "quit_smoking", "quit_smokeless", "quit_smoking_intent", "quit_slt_intent",
+  "user_type", "user3", "smoker", "smokeless", "dual_use",
+  "anti_tob_expo", "anti_cig_expo", "anti_slt_expo",
+  "age_group", "gender", "education", "employment", "residence_label",
+  "country"
+)
+
+all_available <- TRUE
+for (var in core_vars) {
+  has <- c(var %in% names(data_clean), var %in% names(in_clean),
+           var %in% names(ba_clean), var %in% names(sl_clean))
+  cat(sprintf("%-20s: PK=%s IN=%s BA=%s SL=%s %s\n", var,
+              ifelse(has[1],"✓","✗"), ifelse(has[2],"✓","✗"),
+              ifelse(has[3],"✓","✗"), ifelse(has[4],"✓","✗"),
+              ifelse(all(has), "OK", "MISSING")))
+  if (!all(has)) all_available <- FALSE
+}
+stopifnot(all_available)
+```
+
+
+```{r}
+# ==============================================================================
+# STACK ALL COUNTRIES
+# ==============================================================================
+
+pooled_data <- bind_rows(
+  data_clean %>% select(all_of(core_vars)),
+  in_clean   %>% select(all_of(core_vars)),
+  ba_clean   %>% select(all_of(core_vars)),
+  sl_clean   %>% select(all_of(core_vars))
+)
+
+cat("Pooled N =", nrow(pooled_data), "\n")
+pooled_data %>% count(country) %>% mutate(pct = round(100*n/sum(n),1))
+pooled_data %>% count(user_type, country) %>% pivot_wider(names_from = country, values_from = n, values_fill = 0)
+```
+
+
+```{r}
+# ==============================================================================
+# POOLED SURVEY DESIGN
+# ==============================================================================
+
+options(survey.lonely.psu = "adjust")
+
+pooled_design <- svydesign(
+  id      = ~gatscluster,
+  strata  = ~interaction(country, gatsstrata),
+  weights = ~gatsweight,
+  data    = pooled_data,
+  nest    = TRUE
+)
+
+ensure_levels_pooled <- function(des) {
+  update(
+    des,
+    age_group       = factor(age_group, levels = c("15-24","25-44","45-64","65+")),
+    gender          = factor(gender, levels = c("Female","Male")),
+    education       = factor(education, levels = c("No Education","Primary or Less","Secondary or above")),
+    residence_label = factor(residence_label, levels = c("Rural","Urban")),
+    employment      = factor(employment, levels = c("Not Working","Employed")),
+    country         = factor(country, levels = c("Pakistan","India","Bangladesh","Sri Lanka"))
+  )
+}
+
+pooled_design <- pooled_design %>% ensure_levels_pooled()
+```
+
+
+```{r}
+# ==============================================================================
+# SUBSET TO CURRENT USERS — simplified, since user_type is now restricted
+# ==============================================================================
+
+smokers_pooled <- subset(pooled_design,
+  user_type %in% c("Smoker only", "Dual: Smoker + Smokeless")) %>% ensure_levels_pooled()
+
+slt_pooled <- subset(pooled_design,
+  user_type %in% c("Smokeless only", "Dual: Smoker + Smokeless")) %>% ensure_levels_pooled()
+
+cat("Smokers pooled:", nrow(smokers_pooled$variables),
+    " SLT pooled:", nrow(slt_pooled$variables), "\n")
+print(table(smokers_pooled$variables$country))
+print(table(slt_pooled$variables$country))
+```
+
+
+```{r}
+# ==============================================================================
+# POOLED MODELS (dual_use included, matches country-specific specs)
+# ==============================================================================
+
+model_smk_attempt_pooled <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education +
+    residence_label + employment + country,
+  design = smokers_pooled, family = binomial(link = "logit")
+)
+model_smk_intent_pooled <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education +
+    residence_label + employment + country,
+  design = smokers_pooled, family = binomial(link = "logit")
+)
+model_slt_attempt_pooled <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education +
+    residence_label + employment + country,
+  design = slt_pooled, family = binomial(link = "logit")
+)
+model_slt_intent_pooled <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education +
+    residence_label + employment + country,
+  design = slt_pooled, family = binomial(link = "logit")
+)
+
+summary(model_smk_attempt_pooled)
+summary(model_smk_intent_pooled)
+summary(model_slt_attempt_pooled)
+summary(model_slt_intent_pooled)
+```
+
+
+```{r}
+# ==============================================================================
+# HELPER FUNCTIONS (dual_use added to recode map)
+# ==============================================================================
+
+tidy_or <- function(model) {
+  broom::tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(`OR (95% CI)` = ifelse(
+      term == "(Intercept)", "",
+      paste0(round(estimate, 2), " (", round(conf.low, 2), "\u2013", round(conf.high, 2), ")",
+             ifelse(p.value < 0.05, "*", ""))
+    )) %>%
+    select(term, `OR (95% CI)`)
+}
+
+recode_terms_pooled <- function(df, exposure_term, exposure_label) {
+  df %>%
+    mutate(
+      Level = dplyr::recode(term,
+        "(Intercept)"                       = "Intercept",
+        !!exposure_term                     := exposure_label,
+        "dual_use"                          = "Dual use",
+        "age_group25-44"                    = "25\u201344",
+        "age_group45-64"                    = "45\u201364",
+        "age_group65+"                      = "65+",
+        "genderMale"                        = "Male",
+        "educationPrimary or Less"          = "Primary or Less",
+        "educationSecondary or above"       = "Secondary or above",
+        "residence_labelUrban"              = "Urban",
+        "employmentEmployed"                = "Employed",
+        "countryIndia"                      = "India",
+        "countryBangladesh"                 = "Bangladesh",
+        "countrySri Lanka"                  = "Sri Lanka",
+        .default = term
+      ),
+      Predictor = case_when(
+        Level == exposure_label                          ~ "Anti-Tobacco Exposure",
+        Level == "Dual use"                               ~ "Dual Use",
+        Level %in% c("25\u201344","45\u201364","65+")     ~ "Age Group",
+        Level == "Male"                                    ~ "Gender",
+        Level %in% c("Primary or Less","Secondary or above") ~ "Education",
+        Level == "Urban"                                   ~ "Residence",
+        Level == "Employed"                                 ~ "Employment",
+        Level %in% c("India","Bangladesh","Sri Lanka")     ~ "Country",
+        TRUE ~ NA_character_
+      )
+    )
+}
+
+build_pooled_table <- function(model_attempt, model_intent, exposure_term, exposure_label,
+                                table_num, table_title, outcome_span, footnote_text) {
+
+  attempt_or <- tidy_or(model_attempt) %>% rename(`Quit Attempt OR (95% CI)` = `OR (95% CI)`)
+  intent_or  <- tidy_or(model_intent)  %>% rename(`Quit Intention OR (95% CI)` = `OR (95% CI)`)
+
+  combined <- attempt_or %>%
+    full_join(intent_or, by = "term") %>%
+    recode_terms_pooled(exposure_term, exposure_label)
+
+  ref_rows <- tibble::tribble(
+    ~Predictor,   ~Level,                      ~`Quit Attempt OR (95% CI)`, ~`Quit Intention OR (95% CI)`,
+    "Age Group",  "15\u201324 (Reference)",    "", "",
+    "Gender",     "Female (Reference)",        "", "",
+    "Education",  "No Education (Reference)",  "", "",
+    "Residence",  "Rural (Reference)",         "", "",
+    "Employment", "Not Working (Reference)",   "", "",
+    "Country",    "Pakistan (Reference)",      "", ""
+  )
+
+  final_tab <- bind_rows(
+    ref_rows,
+    combined %>% filter(term != "(Intercept)") %>%
+      select(Predictor, Level, `Quit Attempt OR (95% CI)`, `Quit Intention OR (95% CI)`)
+  ) %>%
+    mutate(Predictor = factor(Predictor, levels = c(
+      "Anti-Tobacco Exposure", "Dual Use", "Age Group", "Gender",
+      "Education", "Residence", "Employment", "Country"))) %>%
+    arrange(Predictor) %>%
+    mutate(
+      Level = if_else(is.na(Level), "", Level),
+      Variable = case_when(
+        grepl("\\(Reference\\)", Level) ~ paste0(as.character(Predictor), "  \u2014  ", Level),
+        Level == ""                     ~ as.character(Predictor),
+        TRUE                            ~ paste0("    ", Level)
+      ),
+      `Quit Attempt OR (95% CI)`   = if_else(is.na(`Quit Attempt OR (95% CI)`), "", `Quit Attempt OR (95% CI)`),
+      `Quit Intention OR (95% CI)` = if_else(is.na(`Quit Intention OR (95% CI)`), "", `Quit Intention OR (95% CI)`)
+    ) %>%
+    select(Variable, `Quit Attempt OR (95% CI)`, `Quit Intention OR (95% CI)`)
+
+  knitr::kable(final_tab, align = "lcc", na = "",
+    caption = paste0("Table ", table_num, ". ", table_title)) %>%
+    kableExtra::kable_styling(full_width = FALSE, position = "left",
+                              bootstrap_options = c("condensed"), font_size = 11) %>%
+    kableExtra::column_spec(1, width = "9cm") %>%
+    kableExtra::column_spec(2, width = "4.5cm") %>%
+    kableExtra::column_spec(3, width = "4.5cm") %>%
+    kableExtra::add_header_above(c(" " = 1, outcome_span = 2)) %>%
+    kableExtra::footnote(general = footnote_text, footnote_as_chunk = TRUE)
+}
+```
+
+
+```{r}
+# ==============================================================================
+# TABLE 1 & 2 — POOLED (dual_use row now included automatically)
+# ==============================================================================
+
+build_pooled_table(
+  model_smk_attempt_pooled, model_smk_intent_pooled,
+  "anti_cig_expo", "Exposed to Anti-Cigarette Media/HWL",
+  table_num = 1,
+  table_title = "Associations with Quit Attempt and Quit Intention among Smokers \u2014 Pooled Analysis (4 Countries)",
+  outcome_span = "Smoking Outcomes",
+  footnote_text = "* p < 0.05. Survey-weighted logistic regression. Dual use = current use of both smoking and smokeless tobacco. Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working, Pakistan. Pooled analysis includes Pakistan, India, Bangladesh, and Sri Lanka."
+)
+
+build_pooled_table(
+  model_slt_attempt_pooled, model_slt_intent_pooled,
+  "anti_slt_expo", "Exposed to Anti-SLT Media/HWL",
+  table_num = 2,
+  table_title = "Associations with Quit Attempt and Quit Intention among Smokeless Tobacco Users \u2014 Pooled Analysis (4 Countries)",
+  outcome_span = "Smokeless Tobacco Outcomes",
+  footnote_text = "* p < 0.05. Survey-weighted logistic regression. Dual use = current use of both smoking and smokeless tobacco. Reference categories: Age 15\u201324, Female, No Education, Rural, Not Working, Pakistan. Pooled analysis includes Pakistan, India, Bangladesh, and Sri Lanka."
+)
+```
+
+
+```{r}
+# ==============================================================================
+# SENSITIVITY: MODELS WITHOUT COUNTRY (dual_use retained — only 'country' dropped)
+# ==============================================================================
+
+model_smk_attempt_no_country <- svyglm(
+  quit_smoking ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_pooled, family = binomial(link = "logit"))
+model_smk_intent_no_country <- svyglm(
+  quit_smoking_intent ~ anti_cig_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = smokers_pooled, family = binomial(link = "logit"))
+model_slt_attempt_no_country <- svyglm(
+  quit_smokeless ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_pooled, family = binomial(link = "logit"))
+model_slt_intent_no_country <- svyglm(
+  quit_slt_intent ~ anti_slt_expo + dual_use + age_group + gender + education + residence_label + employment,
+  design = slt_pooled, family = binomial(link = "logit"))
+
+compare_expo <- function(model_with, model_without, expo_term) {
+  bind_rows(
+    tidy(model_with, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == expo_term) %>% mutate(model = "With Country"),
+    tidy(model_without, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == expo_term) %>% mutate(model = "Without Country")
+  ) %>%
+    mutate(
+      OR_CI = paste0(round(estimate,2)," (",round(conf.low,2),"\u2013",round(conf.high,2),")"),
+      p_value = ifelse(p.value < 0.001, "<0.001",
+                       ifelse(p.value < 0.05, paste0(round(p.value,3),"*"), as.character(round(p.value,3))))
+    ) %>%
+    select(model, OR_CI, p_value)
+}
+
+comparison_smoking_attempts <- compare_expo(model_smk_attempt_pooled, model_smk_attempt_no_country, "anti_cig_expo")
+comparison_smoking_intent   <- compare_expo(model_smk_intent_pooled,  model_smk_intent_no_country,  "anti_cig_expo")
+comparison_slt_attempts     <- compare_expo(model_slt_attempt_pooled, model_slt_attempt_no_country, "anti_slt_expo")
+comparison_slt_intent       <- compare_expo(model_slt_intent_pooled,  model_slt_intent_no_country,  "anti_slt_expo")
+
+for (tbl in list(
+  list(comparison_smoking_attempts, "Anti-Cigarette Exposure Effect on Quit Attempts"),
+  list(comparison_smoking_intent,   "Anti-Cigarette Exposure Effect on Quit Intentions"),
+  list(comparison_slt_attempts,     "Anti-SLT Exposure Effect on Quit Attempts"),
+  list(comparison_slt_intent,       "Anti-SLT Exposure Effect on Quit Intentions")
+)) {
+  print(
+    kable(tbl[[1]], col.names = c("Model","OR (95% CI)","p-value"), align = c("l","c","c"),
+          caption = paste0("Comparison: ", tbl[[2]], " (With vs Without Country)")) %>%
+      kable_styling(full_width = FALSE, position = "left") %>%
+      footnote(general = "* p < 0.05. Models adjusted for age, gender, education, residence, employment, and dual use.",
+               footnote_as_chunk = TRUE)
+  )
+}
+
+cat("\nLikelihood Ratio Tests:\n")
+cat("Smoking Quit Attempts:\n");   print(anova(model_smk_attempt_no_country, model_smk_attempt_pooled))
+cat("Smoking Quit Intentions:\n"); print(anova(model_smk_intent_no_country,  model_smk_intent_pooled))
+cat("SLT Quit Attempts:\n");       print(anova(model_slt_attempt_no_country, model_slt_attempt_pooled))
+cat("SLT Quit Intentions:\n");     print(anova(model_slt_intent_no_country,  model_slt_intent_pooled))
+```
+
+
+```{r}
+# ==============================================================================
+# SIMPLIFIED PREVALENCE PLOT (Smoker / Smokeless / Dual) — replaces old Plot 1 & 2
+# ==============================================================================
+# NOTE: the old "Plot 2" (waterpipe/e-cig/multiple stacked bar) is now obsolete —
+# those categories no longer exist anywhere in user_type after harmonization.
+
+countries <- c("Pakistan", "India", "Bangladesh", "Sri Lanka")
+country_year_labels <- c(Pakistan = "Pakistan\n(2014)", India = "India\n(2016)",
+                         Bangladesh = "Bangladesh\n(2017)", `Sri Lanka` = "Sri Lanka\n(2019)")
+
+user3_combined <- bind_rows(lapply(countries, function(ctry) {
+  des_sub <- subset(pooled_design, country == ctry & !is.na(user3))
+  est <- svymean(~factor(user3), des_sub, na.rm = TRUE)
+  data.frame(country = ctry, Category = gsub("factor\\(user3\\)", "", names(est)),
+             Proportion = as.numeric(est), SE = as.numeric(SE(est)))
+})) %>%
+  mutate(
+    LCL = pmax(0, Proportion - 1.96*SE), UCL = pmin(1, Proportion + 1.96*SE),
+    Percent = round(100*Proportion, 1),
+    country_lbl = country_year_labels[country],
+    Category = factor(Category, levels = c("Smoker","Smokeless","Dual"))
+  )
+
+ggplot(user3_combined, aes(x = Category, y = Proportion, fill = Category)) +
+  geom_col(width = 0.65) +
+  geom_errorbar(aes(ymin = LCL, ymax = UCL), width = 0.2, linewidth = 0.5) +
+  geom_text(aes(label = paste0(Percent, "%")), vjust = -0.5, size = 3.2) +
+  scale_fill_manual(values = c("Smoker" = "#E87722", "Smokeless" = "#90EE90", "Dual" = "#4472C4")) +
+  scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, 0.12))) +
+  facet_wrap(~country_lbl, nrow = 1, strip.position = "bottom") +
+  labs(title = "Weighted Prevalence of Tobacco User Types \u2014 South Asia (GATS)",
+       x = NULL, y = "Weighted Prevalence", fill = "User Type",
+       caption = "Note: Restricted to Smoker only, Smokeless only, and Dual (Smoker + Smokeless) users.") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 13), strip.placement = "outside",
+        strip.text = element_text(face = "bold", size = 10.5), axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), panel.spacing = unit(1, "lines"),
+        legend.position = "bottom", plot.caption = element_text(size = 8, hjust = 0, margin = margin(t = 8)))
+```
+
+
+```{r}
+# ==============================================================================
+# COUNTRY-STRATIFIED MODELS (dual_use now included — matches harmonized country code)
+# ==============================================================================
+
+run_model <- function(outcome, exposure, design) {
+  tryCatch(
+    svyglm(as.formula(paste(outcome, "~", exposure,
+                            "+ dual_use + age_group + gender + education + residence_label + employment")),
+           design = design, family = binomial()),
+    error = function(e) NULL
+  )
+}
+
+# NOTE: smokers_pk/slt_pk/smokers_in/slt_in/smokers_ba/slt_ba/smokers_sl/slt_sl
+# already exist from each country's harmonized script — reused directly here,
+# NOT rebuilt, so we don't silently overwrite the dual_use-inclusive models
+# you already ran country-by-country.
+
+extract_expo_or <- function(model, expo_term) {
+  if (is.null(model)) return("\u2014")
+  tryCatch({
+    est <- broom::tidy(model, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == expo_term)
+    if (nrow(est) == 0) return("\u2014")
+    paste0(round(est$estimate,2)," (",round(est$conf.low,2),"\u2013",round(est$conf.high,2),")",
+           ifelse(est$p.value < 0.05, "*", ""))
+  }, error = function(e) "\u2014")
+}
+
+summary_tab <- tibble::tribble(
+  ~Country, ~`Smk Quit Attempt`, ~`Smk Quit Intention`, ~`SLT Quit Attempt`, ~`SLT Quit Intention`,
+  "Pakistan",
+  extract_expo_or(model_smk_attempt_pk, "anti_cig_expo"), extract_expo_or(model_smk_intent_pk, "anti_cig_expo"),
+  extract_expo_or(model_slt_attempt_pk, "anti_slt_expo"), extract_expo_or(model_slt_intent_pk, "anti_slt_expo"),
+  "India",
+  extract_expo_or(model_smk_attempt_in, "anti_cig_expo"), extract_expo_or(model_smk_intent_in, "anti_cig_expo"),
+  extract_expo_or(model_slt_attempt_in, "anti_slt_expo"), extract_expo_or(model_slt_intent_in, "anti_slt_expo"),
+  "Bangladesh",
+  extract_expo_or(model_smk_attempt_ba, "anti_cig_expo"), extract_expo_or(model_smk_intent_ba, "anti_cig_expo"),
+  extract_expo_or(model_slt_attempt_ba, "anti_slt_expo"), extract_expo_or(model_slt_intent_ba, "anti_slt_expo"),
+  "Sri Lanka",
+  extract_expo_or(model_smk_attempt_sl, "anti_cig_expo"), extract_expo_or(model_smk_intent_sl, "anti_cig_expo"),
+  extract_expo_or(model_slt_attempt_sl, "anti_slt_expo"), extract_expo_or(model_slt_intent_sl, "anti_slt_expo")
+)
+
+knitr::kable(summary_tab, align = "lcccc", na = "\u2014",
+  caption = "Adjusted OR (95% CI) for Anti-Tobacco Media Exposure on Quit Outcomes by Country") %>%
+  kableExtra::kable_styling(full_width = FALSE, position = "left", bootstrap_options = c("condensed"), font_size = 11) %>%
+  kableExtra::add_header_above(c(" " = 1, "Cigarette Smoking" = 2, "Smokeless Tobacco" = 2)) %>%
+  kableExtra::column_spec(1, bold = TRUE, width = "3cm") %>%
+  kableExtra::column_spec(2:5, width = "4cm") %>%
+  kableExtra::footnote(
+    general = "* p < 0.05. Adjusted OR from survey-weighted logistic regression. Models adjusted for age, gender, education, residence, employment, and dual use.",
+    footnote_as_chunk = TRUE
+  )
+```
+
+```{r}
+# ==============================================================================
+# POOLED ANALYTIC FLOW DIAGRAM — self-contained, computed from raw data
+# ==============================================================================
+
+compute_flow <- function(raw_df, smoker_expr, smokeless_expr, media_cols, hwl_cols, country_name) {
+  df <- raw_df %>%
+    mutate(
+      smoker_flow    = !!smoker_expr,
+      smokeless_flow = !!smokeless_expr,
+      any_tobacco_user = if_else(smoker_flow == 1 | smokeless_flow == 1, 1, 0)
+    )
+
+  n_total <- nrow(raw_df)
+  n_any_user <- sum(df$any_tobacco_user)
+
+  n_analytic <- df %>%
+    filter(any_tobacco_user == 1) %>%
+    filter(!is.na(D01) | !is.na(D09),
+           !if_all(any_of(c(media_cols, hwl_cols)), is.na)) %>%
+    nrow()
+
+  tibble(country = country_name, n_total = n_total,
+         n_tobacco_user = n_any_user, n_analytic = n_analytic)
+}
+
+flow_pk <- compute_flow(GATS_PK_raw,
+  quote(if_else(B01 %in% c(1,2), 1, 0, missing = 0)),
+  quote(if_else(C01 %in% c(1,2), 1, 0, missing = 0)),
+  pk_media_smoke_cols, c(pk_hwl_smoke_col, pk_hwl_slt_col), "Pakistan")
+
+flow_in <- compute_flow(GATS_IND_raw,
+  quote(if_else(B01 %in% c(1,2) | B03 %in% c(1,2) |
+    rowSums(across(c(B06A,B06B,B06C,B06E,B06F,B06G,B10A,B10B,B10C,B10E,B10F,B10G),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  quote(if_else(C01 %in% c(1,2) | C03 %in% c(1,2) |
+    rowSums(across(c(C06A,C06B,C06C,C06D,C06E,C06F,C06G,C10A,C10B,C10C,C10D,C10E,C10F,C10G),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  in_media_smoke_cols, c(in_hwl_smoke_col, in_hwl_slt_col), "India")
+
+flow_ba <- compute_flow(GATS_BA_raw,
+  quote(if_else(B01 %in% c(1,2) | B03 %in% c(1,2) |
+    rowSums(across(c(B06A,B06H,B06F,B06B,B06D,B06E,B06G,B10A,B10H,B10F,B10B,B10D,B10E,B10G),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  quote(if_else(C01 %in% c(1,2) | C03 %in% c(1,2) |
+    rowSums(across(c(C06A,C06B,C06C,C06D,C06E,C06F,C06G,C10A,C10B,C10C,C10D,C10E,C10F,C10G),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  ba_media_smoke_cols, c(ba_hwl_smoke_col, ba_hwl_slt_col), "Bangladesh")
+
+flow_sl <- compute_flow(GATS_SL_raw,
+  quote(if_else(B01 %in% c(1,2) | B03 %in% c(1,2) |
+    rowSums(across(c(B06A,B06B,B06C,B06D,B10A,B10B,B10C,B10D),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  quote(if_else(C01 %in% c(1,2) | C03 %in% c(1,2) |
+    rowSums(across(c(C06A,C06B,C06C,C06D,C10A,C10B,C10C,C10D),
+                   ~ . > 0 & . < 888), na.rm=TRUE) > 0, 1, 0, missing = 0)),
+  sl_media_smoke_cols, c(sl_hwl_smoke_col, sl_hwl_slt_col), "Sri Lanka")
+
+# Final restricted N (Smoker/Smokeless/Dual only) — pulled directly from each *_clean
+flow_restricted <- tibble(
+  country = c("Pakistan","India","Bangladesh","Sri Lanka"),
+  n_restricted = c(
+    data_clean %>% filter(!is.na(user_type)) %>% nrow(),
+    in_clean   %>% filter(!is.na(user_type)) %>% nrow(),
+    ba_clean   %>% filter(!is.na(user_type)) %>% nrow(),
+    sl_clean   %>% filter(!is.na(user_type)) %>% nrow()
+  )
+)
+
+flow_summary <- bind_rows(flow_pk, flow_in, flow_ba, flow_sl) %>%
+  left_join(flow_restricted, by = "country") %>%
+  mutate(
+    n_excluded_no_data   = n_tobacco_user - n_analytic,
+    n_excluded_othertype = n_analytic - n_restricted
+  )
+
+flow_summary
+
+pooled_totals <- flow_summary %>%
+  summarise(
+    n_total        = sum(n_total),
+    n_tobacco_user = sum(n_tobacco_user),
+    n_analytic     = sum(n_analytic),
+    n_restricted   = sum(n_restricted)
+  )
+pooled_totals
+```
+
+
+```{r}
+# ---- CONSORT-style flow diagram (ggplot boxes + arrows) -----------------------
+
+box_labels <- c(
+  sprintf("Total interviewed across 4 countries\nN = %s", format(pooled_totals$n_total, big.mark=",")),
+  sprintf("Current tobacco users\nN = %s", format(pooled_totals$n_tobacco_user, big.mark=",")),
+  sprintf("Analytic sample\n(non-missing quit/exposure data)\nN = %s", format(pooled_totals$n_analytic, big.mark=",")),
+  sprintf("Final pooled sample\n(Smoker only / Smokeless only / Dual)\nN = %s", format(pooled_totals$n_restricted, big.mark=","))
+)
+
+excl_labels <- c(
+  sprintf("Excluded: non-tobacco users\nn = %s",
+          format(pooled_totals$n_total - pooled_totals$n_tobacco_user, big.mark=",")),
+  sprintf("Excluded: missing quit attempt/\nintention or exposure data\nn = %s",
+          format(pooled_totals$n_tobacco_user - pooled_totals$n_analytic, big.mark=",")),
+  sprintf("Excluded: waterpipe-only,\ne-cigarette-only, non-users\nn = %s",
+          format(pooled_totals$n_analytic - pooled_totals$n_restricted, big.mark=","))
+)
+
+y_pos <- c(4, 3, 2, 1)
+
+flow_boxes <- tibble(x = 1, y = y_pos, label = box_labels)
+excl_boxes  <- tibble(x = 2.6, y = y_pos[1:3] - 0.5, label = excl_labels)
+
+ggplot() +
+  geom_rect(data = flow_boxes, aes(xmin = x - 0.9, xmax = x + 0.9, ymin = y - 0.35, ymax = y + 0.35),
+            fill = "#EAF2FA", color = "#2C5F8A", linewidth = 0.6) +
+  geom_text(data = flow_boxes, aes(x = x, y = y, label = label), size = 3.1, lineheight = 0.95) +
+  geom_rect(data = excl_boxes, aes(xmin = x - 0.95, xmax = x + 0.95, ymin = y - 0.3, ymax = y + 0.3),
+            fill = "#FBEAEA", color = "#B33A3A", linewidth = 0.5) +
+  geom_text(data = excl_boxes, aes(x = x, y = y, label = label), size = 2.6, lineheight = 0.95) +
+  geom_segment(data = tibble(y = y_pos[1:3]),
+               aes(x = 1, xend = 1, y = y - 0.35, yend = y - 0.65),
+               arrow = arrow(length = unit(0.15, "cm")), linewidth = 0.5) +
+  geom_segment(data = tibble(y = y_pos[1:3] - 0.5),
+               aes(x = 1.9, xend = 2.6, y = y, yend = y), linewidth = 0.4, linetype = "dashed") +
+  scale_x_continuous(limits = c(-0.2, 4), expand = c(0,0)) +
+  scale_y_continuous(limits = c(0.3, 4.6), expand = c(0,0)) +
+  labs(title = "Analytic Sample Flow \u2014 Pooled GATS Sample (4 South Asian Countries)") +
+  theme_void(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, margin = margin(b = 15)))
+```
+
+
+```{r}
+# ---- Country-level breakdown table (supplements the pooled diagram) ----------
+
+flow_summary %>%
+  select(country, n_total, n_tobacco_user, n_analytic, n_restricted) %>%
+  gt() %>%
+  tab_header(title = "Analytic Sample Flow by Country") %>%
+  cols_label(country = "Country", n_total = "Total Interviewed",
+             n_tobacco_user = "Tobacco Users", n_analytic = "Analytic Sample",
+             n_restricted = "Final Restricted Sample") %>%
+  fmt_number(columns = c(n_total, n_tobacco_user, n_analytic, n_restricted), decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Final restricted sample excludes waterpipe-only, e-cigarette-only, and non-tobacco users; retains only Smoker only, Smokeless only, and Dual (Smoker + Smokeless) users.")
+```
+
+```{r}
+# ==============================================================================
+# EXPOSURE PREVALENCE BY COUNTRY — TABLE (not plot), using harmonized pooled design
+# ==============================================================================
+
+exposure_prevalence_table <- bind_rows(
+  rates(subset(smokers_pooled, country == "Pakistan"), "anti_cig_expo") %>% mutate(country = "Pakistan", exposure = "Anti-Cigarette"),
+  rates(subset(smokers_pooled, country == "India"), "anti_cig_expo") %>% mutate(country = "India", exposure = "Anti-Cigarette"),
+  rates(subset(smokers_pooled, country == "Bangladesh"), "anti_cig_expo") %>% mutate(country = "Bangladesh", exposure = "Anti-Cigarette"),
+  rates(subset(smokers_pooled, country == "Sri Lanka"), "anti_cig_expo") %>% mutate(country = "Sri Lanka", exposure = "Anti-Cigarette"),
+
+  rates(subset(slt_pooled, country == "Pakistan"), "anti_slt_expo") %>% mutate(country = "Pakistan", exposure = "Anti-SLT"),
+  rates(subset(slt_pooled, country == "India"), "anti_slt_expo") %>% mutate(country = "India", exposure = "Anti-SLT"),
+  rates(subset(slt_pooled, country == "Bangladesh"), "anti_slt_expo") %>% mutate(country = "Bangladesh", exposure = "Anti-SLT"),
+  rates(subset(slt_pooled, country == "Sri Lanka"), "anti_slt_expo") %>% mutate(country = "Sri Lanka", exposure = "Anti-SLT")
+) %>%
+  mutate(cell = sprintf("%.1f%% (%.1f\u2013%.1f)", pct, lo, hi)) %>%
+  select(country, exposure, cell) %>%
+  pivot_wider(names_from = exposure, values_from = cell)
+
+exposure_prevalence_table %>%
+  gt() %>%
+  tab_header(
+    title = "Table X. Anti-Tobacco Media Exposure Prevalence by Country",
+    subtitle = "Survey-weighted % exposed (95% CI), among current smokers (anti-cigarette) and current SLT users (anti-SLT)"
+  ) %>%
+  cols_label(country = "Country", `Anti-Cigarette` = "Anti-Cigarette Exposure",
+             `Anti-SLT` = "Anti-SLT Exposure") %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Note: Estimates are survey-weighted percentages with 95% confidence intervals. Anti-cigarette exposure assessed among current smokers (smoker-only + dual users); anti-SLT exposure assessed among current SLT users (SLT-only + dual users).")
+```
+
+
+```{r}
+# ==============================================================================
+# CONSOLIDATED TABLE 1: DEMOGRAPHIC CHARACTERISTICS OF POOLED ANALYTIC SAMPLE, BY COUNTRY
+# ==============================================================================
+# Mirrors the structure of get_demo_counts_user3()/get_weighted_colpct_user3(),
+# but groups by country instead of user3. Also includes tobacco user type
+# (Smoker/Smokeless/Dual) as its own variable block, so the table also reports
+# what your original "Table 5" (user-type prevalence) did, in one place.
+
+countries <- c("Pakistan", "India", "Bangladesh", "Sri Lanka")
+demo_vars_pooled <- c("gender", "age_group", "education", "employment", "residence_label", "user3")
+
+var_labels_pooled <- c(
+  gender          = "Gender",
+  age_group       = "Age Group",
+  education       = "Education",
+  employment      = "Employment",
+  residence_label = "Residence",
+  user3           = "Tobacco User Type"
+)
+
+# ---- Unweighted counts: Var x country ----------------------------------------
+get_demo_counts_country <- function(df, var) {
+  stopifnot(var %in% names(df))
+  df %>%
+    filter(!is.na(country)) %>%
+    mutate(`__cat__` = as.character(.data[[var]])) %>%
+    filter(!is.na(`__cat__`)) %>%
+    count(`__cat__`, country, name = "n") %>%
+    complete(`__cat__`, country = factor(countries, levels = countries), fill = list(n = 0)) %>%
+    pivot_wider(names_from = country, values_from = n) %>%
+    mutate(
+      Row_Total = rowSums(across(all_of(countries)), na.rm = TRUE),
+      Variable  = var
+    ) %>%
+    rename(Category = `__cat__`) %>%
+    select(Variable, Category, Row_Total, all_of(countries))
+}
+
+# ---- Weighted column % (+ SE), by country ------------------------------------
+get_weighted_colpct_country <- function(design, var) {
+  x     <- design$variables[[var]]
+  x_fac <- factor(as.character(x))
+  des_v <- do.call(update, c(list(design), setNames(list(x_fac), var)))
+  levs  <- levels(x_fac)
+
+  out <- data.frame(Category = levs, stringsAsFactors = FALSE)
+
+  for (ctry in countries) {
+    d_cat <- subset(des_v, country == ctry)
+    if (length(weights(d_cat)) == 0) {
+      est_vec <- rep(NA_real_, length(levs)); se_vec <- rep(NA_real_, length(levs))
+    } else {
+      est <- svymean(as.formula(paste0("~", var)), d_cat, na.rm = TRUE)
+      se  <- SE(est)
+      est_vec <- as.numeric(est) * 100
+      se_vec  <- as.numeric(se)  * 100
+      if (length(est_vec) != length(levs)) {
+        nm <- names(est)
+        lvl_from_names <- substring(nm, nchar(var) + 1)
+        aligned <- rep(NA_real_, length(levs)); aligned_se <- rep(NA_real_, length(levs))
+        for (i in seq_along(lvl_from_names)) {
+          j <- match(lvl_from_names[i], levs)
+          if (!is.na(j)) { aligned[j] <- est_vec[i]; aligned_se[j] <- se_vec[i] }
+        }
+        est_vec <- aligned; se_vec <- aligned_se
+      }
+    }
+    out[[paste0(ctry, "_pct")]] <- est_vec
+    out[[paste0(ctry, "_se")]]  <- se_vec
+  }
+  out$Variable <- var
+  tibble::as_tibble(out)
+}
+
+# ---- Build ---------------------------------------------------------------------
+table1_counts_pooled   <- bind_rows(lapply(demo_vars_pooled, function(v) get_demo_counts_country(pooled_data, v)))
+table1_weighted_pooled <- bind_rows(lapply(demo_vars_pooled, function(v) get_weighted_colpct_country(pooled_design, v)))
+
+table1_joined_pooled <- table1_counts_pooled %>%
+  left_join(table1_weighted_pooled, by = c("Variable", "Category")) %>%
+  mutate(
+    across(ends_with("_pct"), ~replace_na(., 0)),
+    across(ends_with("_se"),  ~replace_na(., 0)),
+    Variable = dplyr::recode(Variable, !!!var_labels_pooled)
+  ) %>%
+  arrange(factor(Variable, levels = unname(var_labels_pooled)), Category) %>%
+  group_by(Variable) %>%
+  mutate(Variable = if_else(row_number() == 1, Variable, "")) %>%
+  ungroup()
+
+n_pooled_total <- pooled_data %>% filter(!is.na(country)) %>% nrow()
+
+fmt_pct_se <- function(p, s) ifelse(is.na(p), "", sprintf("%.1f (%.1f)", p, s))
+
+table1_disp_pooled <- table1_joined_pooled %>%
+  mutate(
+    Pakistan_pctSE   = fmt_pct_se(Pakistan_pct, Pakistan_se),
+    India_pctSE      = fmt_pct_se(India_pct, India_se),
+    Bangladesh_pctSE = fmt_pct_se(Bangladesh_pct, Bangladesh_se),
+    `Sri Lanka_pctSE`= fmt_pct_se(`Sri Lanka_pct`, `Sri Lanka_se`)
+  ) %>%
+  select(Variable, Category, Row_Total,
+         Pakistan, Pakistan_pctSE,
+         India, India_pctSE,
+         Bangladesh, Bangladesh_pctSE,
+         `Sri Lanka`, `Sri Lanka_pctSE`)
+
+table1_disp_pooled %>%
+  gt() %>%
+  tab_header(
+    title = "Table 1. Demographic Characteristics of the Pooled Analytic Sample, by Country",
+    subtitle = paste0(
+      "Unweighted counts and survey-weighted column percentages (SE). N = ",
+      format(n_pooled_total, big.mark = ","), "."
+    )
+  ) %>%
+  cols_label(
+    Variable = "Variable", Category = "Category", Row_Total = "Row Total",
+    Pakistan = "n", Pakistan_pctSE = "% (SE)",
+    India = "n", India_pctSE = "% (SE)",
+    Bangladesh = "n", Bangladesh_pctSE = "% (SE)",
+    `Sri Lanka` = "n", `Sri Lanka_pctSE` = "% (SE)"
+  ) %>%
+  tab_spanner(label = "Pakistan (2014)", id = "sp_pk", columns = c(Pakistan, Pakistan_pctSE)) %>%
+  tab_spanner(label = "India (2016)", id = "sp_in", columns = c(India, India_pctSE)) %>%
+  tab_spanner(label = "Bangladesh (2017)", id = "sp_ba", columns = c(Bangladesh, Bangladesh_pctSE)) %>%
+  tab_spanner(label = "Sri Lanka (2019)", id = "sp_sl", columns = c(`Sri Lanka`, `Sri Lanka_pctSE`)) %>%
+  fmt_number(columns = c(Row_Total, Pakistan, India, Bangladesh, `Sri Lanka`), decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
+  tab_source_note("Note: Percentages are survey-weighted column percentages within each country. Analytic sample restricted to Smoker only, Smokeless only, and Dual (Smoker + Smokeless) users. 'Tobacco User Type' reports the weighted prevalence of each user category within each country.")
+```
+
+
+```{r}
+# ==============================================================================
+# FIGURE: Prevalence of Tobacco User Types by Country (fully dynamic)
+# ==============================================================================
+
+# ---- Per-country weighted percentages, computed from pooled_design ----
+usertype_by_country <- bind_rows(lapply(countries, function(ctry) {
+  des_sub <- subset(pooled_design, country == ctry & !is.na(user3))
+  est <- svymean(~factor(user3), des_sub, na.rm = TRUE)
+  tibble(
+    country = ctry,
+    user_type = gsub("factor\\(user3\\)", "", names(est)),
+    pct = round(as.numeric(est) * 100, 1)
+  )
+}))
+
+# ---- Pooled row, computed from the FULL pooled_design (not a simple mean of the four) ----
+usertype_pooled <- {
+  des_all <- subset(pooled_design, !is.na(user3))
+  est <- svymean(~factor(user3), des_all, na.rm = TRUE)
+  tibble(
+    country = "Pooled Sample",
+    user_type = gsub("factor\\(user3\\)", "", names(est)),
+    pct = round(as.numeric(est) * 100, 1)
+  )
+}
+
+# ---- Combine and set factor levels/order ----
+usertype_summary <- bind_rows(usertype_pooled, usertype_by_country) %>%
+  mutate(
+    country = factor(country, levels = c("Pooled Sample", "India", "Bangladesh", "Sri Lanka", "Pakistan")),
+    user_type = factor(user_type, levels = c("Smokeless", "Smoker", "Dual"))
+  )
+
+# ---- Plot ----
+ggplot(usertype_summary, aes(x = country, y = pct, fill = user_type)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = paste0(pct, "%")), position = position_stack(vjust = 0.5),
+            size = 4, fontface = "bold", color = "white") +
+  scale_fill_manual(values = c(
+    "Smokeless" = "#E8A2A0",   # dusty rose
+    "Smoker"    = "#C44E4E",   # brick red
+    "Dual"      = "#6E1F1F"    # dark maroon
+  )) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), expand = expansion(mult = c(0, 0.02))) +
+  labs(title = "Prevalence of Tobacco User Types", x = NULL, y = NULL, fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 15),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 11)
+  )
+```
+
