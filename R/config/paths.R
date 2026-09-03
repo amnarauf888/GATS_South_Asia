@@ -19,6 +19,11 @@ RAW_DATA_DIR <- Sys.getenv(
 INTERIM_DIR <- "data/interim"
 dir.create(INTERIM_DIR, recursive = TRUE, showWarnings = FALSE)
 
+# PNG exports of every table and figure (see R/05, R/06's downstream R/07,
+# and R/04a's QC figure).
+OUTPUT_DIR <- "output"
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
 # Small helper so every stage fails with a clear message instead of a
 # cryptic "cannot open file" error when run out of order.
 read_interim <- function(name) {

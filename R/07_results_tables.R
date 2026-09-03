@@ -15,6 +15,7 @@ library(dplyr)
 library(broom)
 library(knitr)
 library(kableExtra)
+library(here)
 
 source("R/config/paths.R")
 source("R/config/variable_maps.R")
@@ -143,6 +144,8 @@ country_or_tables <- lapply(country_keys, function(ck) {
     )
   )
   print(tbl4); print(tbl5)
+  save_kable(tbl4, here("output", sprintf("table4_smokers_aor_%s.png", ck)))
+  save_kable(tbl5, here("output", sprintf("table5_slt_aor_%s.png", ck)))
   list(table4 = tbl4, table5 = tbl5)
 }) %>% setNames(country_keys)
 
@@ -264,6 +267,8 @@ pooled_table2 <- build_pooled_or_table(
   outcome_span = "Smokeless Tobacco Outcomes", footnote_text = POOLED_FOOTNOTE
 )
 print(pooled_table1); print(pooled_table2)
+save_kable(pooled_table1, here("output", "aor_smokers_pooled.png"))
+save_kable(pooled_table2, here("output", "aor_slt_pooled.png"))
 
 # ==============================================================================
 # COUNTRY-STRATIFIED SUMMARY TABLE (reuses country_models -- not refit)
@@ -303,6 +308,7 @@ country_stratified_gt <- knitr::kable(
     footnote_as_chunk = TRUE
   )
 print(country_stratified_gt)
+save_kable(country_stratified_gt, here("output", "table_country_stratified_summary.png"))
 
 # ==============================================================================
 # SENSITIVITY: WITH vs WITHOUT COUNTRY (comparison tables; LR test is in 04b)
@@ -331,14 +337,21 @@ sensitivity_comparisons <- list(
        "Anti-SLT Exposure Effect on Quit Intentions")
 )
 
-for (tbl in sensitivity_comparisons) {
-  print(
+sensitivity_filenames <- c(
+  "sensitivity_smk_attempt.png", "sensitivity_smk_intent.png",
+  "sensitivity_slt_attempt.png", "sensitivity_slt_intent.png"
+)
+
+for (i in seq_along(sensitivity_comparisons)) {
+  tbl <- sensitivity_comparisons[[i]]
+  sensitivity_kbl <-
     kable(tbl[[1]], col.names = c("Model", "OR (95% CI)", "p-value"), align = c("l", "c", "c"),
           caption = paste0("Comparison: ", tbl[[2]], " (With vs Without Country)")) %>%
       kable_styling(full_width = FALSE, position = "left") %>%
       footnote(general = "* p < 0.05. Models adjusted for age, gender, education, residence, employment, and dual use.",
                footnote_as_chunk = TRUE)
-  )
+  print(sensitivity_kbl)
+  save_kable(sensitivity_kbl, here("output", sensitivity_filenames[i]))
 }
 
 saveRDS(

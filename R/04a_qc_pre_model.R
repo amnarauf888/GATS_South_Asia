@@ -16,6 +16,7 @@
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(here)
 
 source("R/config/paths.R")
 source("R/config/variable_maps.R")
@@ -175,4 +176,6 @@ consort_plot <- ggplot() +
   theme(plot.title = element_text(face = "bold", hjust = 0.5, margin = margin(b = 15)))
 
 print(consort_plot)
+ggsave(here("output", "consort_flow_diagram.png"), consort_plot,
+       width = 8, height = 8, dpi = 300, bg = "white")
 saveRDS(consort_plot, file.path(INTERIM_DIR, "qc_consort_plot.rds"))

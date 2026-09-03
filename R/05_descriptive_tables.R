@@ -19,6 +19,7 @@ library(tidyr)
 library(survey)
 library(gt)
 library(ggplot2)
+library(here)
 
 source("R/config/paths.R")
 source("R/config/variable_maps.R")
@@ -212,6 +213,7 @@ for (ck in country_keys) {
     )
   )
   print(table1_by_country[[ck]])
+  gtsave(table1_by_country[[ck]], here("output", sprintf("table1_%s.png", ck)))
 
   table2_by_country[[ck]] <- exposure_by_demo(d$smokers, "anti_cig_expo", demo_vars, var_labels)
   table3_by_country[[ck]] <- exposure_by_demo(d$slt,     "anti_slt_expo", demo_vars, var_labels)
@@ -220,16 +222,20 @@ for (ck in country_keys) {
               sum(!is.na(d$slt$variables$anti_slt_expo))))
   print(table2_by_country[[ck]])
   print(table3_by_country[[ck]])
+  gtsave(gt(table2_by_country[[ck]]), here("output", sprintf("table2_anti_smoking_expo_%s.png", ck)))
+  gtsave(gt(table3_by_country[[ck]]), here("output", sprintf("table3_anti_slt_expo_%s.png", ck)))
 
-  cat(sprintf("%s -- overall exposure + quit rates:\n", map$label))
-  print(bind_rows(
+  rates_overall <- bind_rows(
     rates(d$smokers, "anti_cig_expo"),
     rates(d$slt,     "anti_slt_expo"),
     rates(d$smokers, "quit_smoking"),
     rates(d$smokers, "quit_smoking_intent"),
     rates(d$slt,     "quit_smokeless"),
     rates(d$slt,     "quit_slt_intent")
-  ))
+  )
+  cat(sprintf("%s -- overall exposure + quit rates:\n", map$label))
+  print(rates_overall)
+  gtsave(gt(rates_overall), here("output", sprintf("rates_overall_%s.png", ck)))
 }
 
 saveRDS(list(table1 = table1_by_country, table2 = table2_by_country, table3 = table3_by_country),
@@ -348,6 +354,7 @@ table1_pooled_gt <- table1_disp_pooled %>%
     "prevalence of each user category within each country."
   ))
 print(table1_pooled_gt)
+gtsave(table1_pooled_gt, here("output", "table1_pooled.png"))
 
 # ==============================================================================
 # POOLED: EXPOSURE PREVALENCE BY COUNTRY (TABLE X)
@@ -377,6 +384,7 @@ exposure_prevalence_gt <- exposure_prevalence_table %>%
     "users (SLT-only + dual users)."
   ))
 print(exposure_prevalence_gt)
+gtsave(exposure_prevalence_gt, here("output", "table_exposure_prevalence_pooled.png"))
 
 # ==============================================================================
 # FIGURES: PREVALENCE OF TOBACCO USER TYPES
@@ -419,6 +427,8 @@ prevalence_by_country_plot <- ggplot(user3_combined, aes(x = Category, y = Propo
         legend.position = "bottom", plot.caption = element_text(size = 8, hjust = 0, margin = margin(t = 8)))
 
 print(prevalence_by_country_plot)
+ggsave(here("output", "fig1_prevalence_by_country.png"), prevalence_by_country_plot,
+       width = 12, height = 5, dpi = 300, bg = "white")
 
 # ---- Stacked bar chart: user type composition, pooled + each country ----------
 
@@ -453,6 +463,8 @@ usertype_composition_plot <- ggplot(usertype_summary, aes(x = country, y = pct, 
         legend.position = "bottom", axis.text.x = element_text(size = 11))
 
 print(usertype_composition_plot)
+ggsave(here("output", "fig2_usertype_composition.png"), usertype_composition_plot,
+       width = 8, height = 6, dpi = 300, bg = "white")
 
 saveRDS(
   list(table1_pooled = table1_pooled_gt, exposure_prevalence = exposure_prevalence_gt,

@@ -55,3 +55,7 @@ data/interim/
 # Default Rscript graphics device output when a script print()s a plot
 # outside RStudio/knitr
 Rplots.pdf
+
+data/*.csv
+
+
