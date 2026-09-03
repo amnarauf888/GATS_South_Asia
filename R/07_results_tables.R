@@ -125,7 +125,7 @@ country_or_tables <- lapply(country_keys, function(ck) {
   m   <- models$country_models[[ck]]
 
   tbl4 <- build_country_or_table(
-    m$smk_attempt, m$smk_intent, "anti_cig_expo", "Exposed to Anti-Cigarette Media/HWL",
+    m$smk_attempt, m$smk_intent, "anti_cig_expo", "Exposed to Anti-Smoking Media/HWL",
     table_num = 4,
     table_title = sprintf("Adjusted odds ratios for quit attempt and quit intention among smokers, %s GATS %d", map$label, map$year),
     footnote_text = sprintf(
@@ -184,7 +184,7 @@ recode_terms_pooled <- function(df, exposure_term, exposure_label) {
         Level == exposure_label                                ~ "Anti-Tobacco Exposure",
         Level == "Dual use"                                      ~ "Dual Use",
         Level %in% c("25–44", "45–64", "65+")         ~ "Age Group",
-        Level == "Male"                                          ~ "Gender",
+        Level == "Male"                                          ~ "Sex",
         Level %in% c("Primary or Less", "Secondary or above")  ~ "Education",
         Level == "Urban"                                         ~ "Residence",
         Level == "Employed"                                      ~ "Employment",
@@ -206,7 +206,7 @@ build_pooled_or_table <- function(model_attempt, model_intent, exposure_term, ex
   ref_rows <- tibble::tribble(
     ~Predictor,   ~Level,                      ~`Quit Attempt OR (95% CI)`, ~`Quit Intention OR (95% CI)`,
     "Age Group",  "15–24 (Reference)",    "", "",
-    "Gender",     "Female (Reference)",        "", "",
+    "Sex",        "Female (Reference)",        "", "",
     "Education",  "No Education (Reference)",  "", "",
     "Residence",  "Rural (Reference)",         "", "",
     "Employment", "Not Working (Reference)",   "", "",
@@ -219,7 +219,7 @@ build_pooled_or_table <- function(model_attempt, model_intent, exposure_term, ex
       select(Predictor, Level, `Quit Attempt OR (95% CI)`, `Quit Intention OR (95% CI)`)
   ) %>%
     mutate(Predictor = factor(Predictor, levels = c(
-      "Anti-Tobacco Exposure", "Dual Use", "Age Group", "Gender", "Education", "Residence", "Employment", "Country"
+      "Anti-Tobacco Exposure", "Dual Use", "Age Group", "Sex", "Education", "Residence", "Employment", "Country"
     ))) %>%
     arrange(Predictor) %>%
     mutate(
@@ -251,7 +251,7 @@ POOLED_FOOTNOTE <- paste0(
 
 pooled_table1 <- build_pooled_or_table(
   models$pooled_models$smk_attempt, models$pooled_models$smk_intent,
-  "anti_cig_expo", "Exposed to Anti-Cigarette Media/HWL",
+  "anti_cig_expo", "Exposed to Anti-Smoking Media/HWL",
   table_num = 1,
   table_title = "Associations with Quit Attempt and Quit Intention among Smokers — Pooled Analysis (4 Countries)",
   outcome_span = "Smoking Outcomes", footnote_text = POOLED_FOOTNOTE
@@ -295,7 +295,7 @@ country_stratified_gt <- knitr::kable(
   caption = "Adjusted OR (95% CI) for Anti-Tobacco Media Exposure on Quit Outcomes by Country"
 ) %>%
   kableExtra::kable_styling(full_width = FALSE, position = "left", bootstrap_options = c("condensed"), font_size = 11) %>%
-  kableExtra::add_header_above(c(" " = 1, "Cigarette Smoking" = 2, "Smokeless Tobacco" = 2)) %>%
+  kableExtra::add_header_above(c(" " = 1, "Smoking" = 2, "Smokeless Tobacco" = 2)) %>%
   kableExtra::column_spec(1, bold = TRUE, width = "3cm") %>%
   kableExtra::column_spec(2:5, width = "4cm") %>%
   kableExtra::footnote(
@@ -322,9 +322,9 @@ compare_expo <- function(model_with, model_without, expo_term) {
 
 sensitivity_comparisons <- list(
   list(compare_expo(models$pooled_models$smk_attempt, models$pooled_models_no_country$smk_attempt, "anti_cig_expo"),
-       "Anti-Cigarette Exposure Effect on Quit Attempts"),
+       "Anti-Smoking Exposure Effect on Quit Attempts"),
   list(compare_expo(models$pooled_models$smk_intent, models$pooled_models_no_country$smk_intent, "anti_cig_expo"),
-       "Anti-Cigarette Exposure Effect on Quit Intentions"),
+       "Anti-Smoking Exposure Effect on Quit Intentions"),
   list(compare_expo(models$pooled_models$slt_attempt, models$pooled_models_no_country$slt_attempt, "anti_slt_expo"),
        "Anti-SLT Exposure Effect on Quit Attempts"),
   list(compare_expo(models$pooled_models$slt_intent, models$pooled_models_no_country$slt_intent, "anti_slt_expo"),

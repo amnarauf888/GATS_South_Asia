@@ -25,7 +25,7 @@ source("R/config/variable_maps.R")
 
 demo_vars  <- c("gender", "age_group", "education", "employment", "residence_label")
 var_labels <- c(
-  gender = "Gender", age_group = "Age group", education = "Education",
+  gender = "Sex", age_group = "Age group", education = "Education",
   employment = "Employment", residence_label = "Residence"
 )
 cats <- c("Smoker", "Smokeless", "Dual")
@@ -244,7 +244,7 @@ pooled_data <- read_interim("clean_pooled.rds")
 
 demo_vars_pooled <- c("gender", "age_group", "education", "employment", "residence_label", "user3")
 var_labels_pooled <- c(
-  gender = "Gender", age_group = "Age Group", education = "Education",
+  gender = "Sex", age_group = "Age Group", education = "Education",
   employment = "Employment", residence_label = "Residence", user3 = "Tobacco User Type"
 )
 
@@ -355,7 +355,7 @@ print(table1_pooled_gt)
 
 exposure_prevalence_table <- purrr::map_dfr(country_order, function(ctry) {
   bind_rows(
-    rates(subset(pooled$smokers, country == ctry), "anti_cig_expo") %>% mutate(country = ctry, exposure = "Anti-Cigarette"),
+    rates(subset(pooled$smokers, country == ctry), "anti_cig_expo") %>% mutate(country = ctry, exposure = "Anti-Smoking"),
     rates(subset(pooled$slt,     country == ctry), "anti_slt_expo") %>% mutate(country = ctry, exposure = "Anti-SLT")
   )
 }) %>%
@@ -367,12 +367,12 @@ exposure_prevalence_gt <- exposure_prevalence_table %>%
   gt() %>%
   tab_header(
     title = "Table X. Anti-Tobacco Media Exposure Prevalence by Country",
-    subtitle = "Survey-weighted % exposed (95% CI), among current smokers (anti-cigarette) and current SLT users (anti-SLT)"
+    subtitle = "Survey-weighted % exposed (95% CI), among current smokers (anti-smoking) and current SLT users (anti-SLT)"
   ) %>%
-  cols_label(country = "Country", `Anti-Cigarette` = "Anti-Cigarette Exposure", `Anti-SLT` = "Anti-SLT Exposure") %>%
+  cols_label(country = "Country", `Anti-Smoking` = "Anti-Smoking Exposure", `Anti-SLT` = "Anti-SLT Exposure") %>%
   tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels(everything())) %>%
   tab_source_note(paste0(
-    "Note: Estimates are survey-weighted percentages with 95% confidence intervals. Anti-cigarette exposure ",
+    "Note: Estimates are survey-weighted percentages with 95% confidence intervals. Anti-smoking exposure ",
     "assessed among current smokers (smoker-only + dual users); anti-SLT exposure assessed among current SLT ",
     "users (SLT-only + dual users)."
   ))
