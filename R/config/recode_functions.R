@@ -57,19 +57,15 @@ filter_analysis_sample <- function(df, map) {
 }
 
 derive_quit_outcomes <- function(df, map) {
-  invalid_d01 <- map$quit_attempt_invalid_codes$D01
-  invalid_d09 <- map$quit_attempt_invalid_codes$D09
   df %>%
     mutate(
       quit_smoking = case_when(
         D01 == 1 ~ 1,
         D01 == 2 ~ 0,
-        D01 %in% invalid_d01 | is.na(D01) ~ NA_real_
       ),
       quit_smokeless = case_when(
         D09 == 1 ~ 1,
         D09 == 2 ~ 0,
-        D09 %in% invalid_d09 | is.na(D09) ~ NA_real_
       ),
       quit_smoking_intent = case_when(
         D08 %in% c(1, 2) ~ 1,
